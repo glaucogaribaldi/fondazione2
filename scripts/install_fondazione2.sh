@@ -55,6 +55,8 @@ if command -v docker >/dev/null 2>&1; then
   docker ps -aq | xargs -r docker rm -f || true
   echo "Pruning all unused docker data, volumes, and images to reclaim disk space..."
   docker system prune -a --volumes -f
+  echo "Removing active database and state volumes..."
+  docker volume rm fondazione2_postgres-data fondazione2_redis-cache-data fondazione2_redis-jobs-data fondazione2_prometheus-data fondazionesemplice_postgres-data fondazionesemplice_redis-cache-data fondazionesemplice_redis-jobs-data || true
 fi
 
 echo "Removing legacy directories..."
