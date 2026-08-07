@@ -2,7 +2,6 @@ import unittest
 import uuid
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 import psycopg2
 
@@ -71,7 +70,7 @@ class HistoricalFailuresTests(unittest.TestCase):
         self.executor = PaperExecutor(db_url=self.db_url)
         self.executor.initialize_lane("lane_1", 1000.0)
 
-    # --- HST-01: Protection orders must execute ---
+    # --- HST-01: Protection orders must execute & persist reasons ---
     def test_hst_01_protection_orders_execute_when_crossed(self):
         # Correctly wiring intent.stop_price as stop loss (Blocker G1)
         intent_id = str(uuid.uuid4())
@@ -110,7 +109,13 @@ class HistoricalFailuresTests(unittest.TestCase):
         pos_after = self.executor.get_position("lane_1", "BTC/USDC")
         self.assertTrue(pos_after is None or pos_after["quantity"] == 0)
 
-    # --- HST-02 & G3: PostgreSQL Concurrency TOCTOU Proof ---
+        # Blocker H2: Re-read result from the database and verify the reason is persist-audited
+        persisted_result = self.executor.get_execution_result(trigger_res.execution_intent_id)
+        self.assertIsNotNone(persisted_result)
+        self.assertEqual(persisted_result["status"], "FILLED")
+        self.assertIn("STOP_LOSS_TRIGGERED", persisted_result["reason_codes"])
+
+    # --- HST-02 & G3 & H1: PostgreSQL Concurrency TOCTOU Proof ---
     def test_hst_02_postgresql_concurrency_toctou_prevention(self):
         # Test serializability and state-checking under concurrent allocation
         # First order uses $200 of cash (quantity 2.0 @ 100.0)
@@ -148,12 +153,16 @@ class HistoricalFailuresTests(unittest.TestCase):
 
     def test_hst_02_postgresql_serializable_concurrency_proof(self):
         """
-        G3: Proven PostgreSQL SERIALIZABLE transaction safety and atomic portfolio-level position limit.
-        At most one conflicting concurrent OPEN is committed, enforcing max_open_positions = 1.
+        G3 & H1: Mandatory PostgreSQL SERIALIZABLE transaction safety and atomic portfolio-level position limit.
+        No silent skips. Environment must supply TEST_POSTGRES_URL.
+        Asserts exactly one successful OPEN and one specific rejection or serialization failure.
         """
-        pg_url = "postgresql://tre:tre-local-bootstrap-change-me@localhost:5433/postgres"
+        pg_url = os.getenv("TEST_POSTGRES_URL")
+        if not pg_url:
+            self.fail("TEST_POSTGRES_URL environment variable is mandatory and must be set for PostgreSQL concurrency certification.")
+
+        # Recreate test schema on real test PostgreSQL
         try:
-            # Recreate test schema on real test PostgreSQL
             conn = psycopg2.connect(pg_url)
             with conn:
                 with conn.cursor() as cur:
@@ -225,15 +234,14 @@ class HistoricalFailuresTests(unittest.TestCase):
                     )""")
             conn.close()
         except Exception as e:
-            self.skipTest(f"PostgreSQL test database not accessible: {e}")
-            return
+            self.fail(f"Failed to connect and initialize test PostgreSQL using TEST_POSTGRES_URL: {e}")
 
         pg_executor = PaperExecutor(db_url=pg_url)
         pg_executor.initialize_lane("lane_concurrency_test", 2000.0)
 
         # We set max_open_positions = 1.
         # We spawn two concurrent threads to open BTC and ETH at the same time.
-        # One must succeed, the other must get rejected or fail serialization (which counts as rejected).
+        # One must succeed (status FILLED), the other must fail (either status REJECTED or psycopg2 SerializationFailure).
         intent_btc = ExecutionIntent(
             execution_intent_id=str(uuid.uuid4()),
             risk_decision_id=str(uuid.uuid4()),
@@ -267,7 +275,6 @@ class HistoricalFailuresTests(unittest.TestCase):
                 res = pg_executor.execute_intent("lane_concurrency_test", intent, 100.0, max_open_positions=1)
                 results.append(res)
             except psycopg2.errors.SerializationFailure as se:
-                # Treated as a safe, serialization aborted rejection
                 errors.append(se)
             except Exception as ex:
                 errors.append(ex)
@@ -281,11 +288,31 @@ class HistoricalFailuresTests(unittest.TestCase):
         t1.join()
         t2.join()
 
-        # Check total committed successful OPEN positions
+        # Blocker H1 Verification:
+        # Verify that we have EXACTLY ONE successful filled OPEN position (filled_count == 1)
         filled_count = len([r for r in results if r.status == "FILLED"])
+        self.assertEqual(filled_count, 1)
+
+        # Verify that the other transaction/outcome is either:
+        # 1. A return result with REJECTED status and OPEN_POSITION_LIMIT reason
+        # 2. Or a psycopg2 SerializationFailure in errors list
+        rejected_count = len([r for r in results if r.status == "REJECTED" and "OPEN_POSITION_LIMIT" in r.reason_codes])
+        serialization_failures = len([e for e in errors if isinstance(e, psycopg2.errors.SerializationFailure)])
         
-        # Verify that max_open_positions limit (1) was strictly respected
-        self.assertLessEqual(filled_count, 1)
+        self.assertEqual(rejected_count + serialization_failures, 1)
+
+        # Verify there are no unexpected exceptions in errors list
+        unexpected_errors = [e for e in errors if not isinstance(e, psycopg2.errors.SerializationFailure)]
+        self.assertEqual(len(unexpected_errors), 0, f"Unexpected errors during concurrent test: {unexpected_errors}")
+
+        # Check PostgreSQL table itself to prove exactly 1 position is currently committed
+        conn = psycopg2.connect(pg_url)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM paper_positions WHERE lane_id = 'lane_concurrency_test' AND quantity > 0")
+                row_count = cur.fetchone()[0]
+                self.assertEqual(row_count, 1)
+        conn.close()
 
     # --- HST-03: Exit is never blocked by entry cooldown ---
     def test_hst_03_cooldown_active_does_not_block_exits(self):

@@ -5,7 +5,7 @@ from psycopg2.extras import RealDictCursor
 from datetime import datetime, UTC
 from typing import Literal, Any
 import sqlite3
-
+import json
 from .models import ExecutionIntent, ExecutionResult, RiskDecision, Action
 
 
@@ -163,7 +163,6 @@ class PaperExecutor:
             if self.db.use_sqlite:
                 row = conn.execute("SELECT price, updated_at FROM market_marks WHERE symbol = ?", (symbol,)).fetchone()
                 if row:
-                    # SQLite start as ISO string
                     try:
                         updated_at = datetime.fromisoformat(row["updated_at"])
                     except ValueError:
@@ -232,16 +231,67 @@ class PaperExecutor:
             if not self.db.use_sqlite:
                 conn.close()
 
-    def execute_intent(self, lane_id: str, intent: ExecutionIntent, fill_price: float, max_open_positions: int | None = None) -> ExecutionResult:
+    def get_execution_result(self, execution_intent_id: str) -> dict[str, Any] | None:
+        """
+        Retrieve a persisted ExecutionResult from the database (Blocker H1/H2).
+        """
+        conn = self.db.get_cursor()
+        try:
+            if self.db.use_sqlite:
+                row = conn.execute(
+                    "SELECT broker_order_id, status, requested_quantity, filled_quantity, average_fill_price, fee, slippage, reason_codes "
+                    "FROM execution_results WHERE execution_intent_id = ?",
+                    (execution_intent_id,)
+                ).fetchone()
+                if row:
+                    return {
+                        "broker_order_id": row["broker_order_id"],
+                        "status": row["status"],
+                        "requested_quantity": float(row["requested_quantity"]),
+                        "filled_quantity": float(row["filled_quantity"]),
+                        "average_fill_price": float(row["average_fill_price"]) if row["average_fill_price"] else None,
+                        "fee": float(row["fee"]),
+                        "slippage": float(row["slippage"]),
+                        "reason_codes": json.loads(row["reason_codes"])
+                    }
+            else:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(
+                        "SELECT broker_order_id, status, requested_quantity, filled_quantity, average_fill_price, fee, slippage, reason_codes "
+                        "FROM execution_results WHERE execution_intent_id = %s",
+                        (execution_intent_id,)
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        reasons = row["reason_codes"]
+                        if isinstance(reasons, str):
+                            reasons = json.loads(reasons)
+                        return {
+                            "broker_order_id": row["broker_order_id"],
+                            "status": row["status"],
+                            "requested_quantity": float(row["requested_quantity"]),
+                            "filled_quantity": float(row["filled_quantity"]),
+                            "average_fill_price": float(row["average_fill_price"]) if row["average_fill_price"] else None,
+                            "fee": float(row["fee"]),
+                            "slippage": float(row["slippage"]),
+                            "reason_codes": reasons
+                        }
+            return None
+        finally:
+            if not self.db.use_sqlite:
+                conn.close()
+
+    def execute_intent(self, lane_id: str, intent: ExecutionIntent, fill_price: float, max_open_positions: int | None = None, reasons: list[str] | None = None) -> ExecutionResult:
         """
         Atomically executes an ExecutionIntent against the database state (HST-02 / HST-09 / HST-06).
-        Enforces G1 stop-loss wiring, G2 slippage dimensional scaling, and G3 serializable safety.
+        Enforces G1 stop-loss wiring, G2 slippage dimensional scaling, G3 serializable safety, and H2 atomic reason persistence.
         """
         # Save fill price immediately as the fresh market mark for this symbol
         self.update_market_mark(intent.symbol, fill_price)
 
         conn = self.db.get_cursor()
         try:
+            reasons_list = reasons or []
             # 1. Process Order Intent under database transaction (psycopg2 starts transaction automatically on SERIALIZABLE)
             if self.db.use_sqlite:
                 # 1b. Idempotency Check (HST-09)
@@ -252,10 +302,16 @@ class PaperExecutor:
                 if existing_intent:
                     intent_id = existing_intent[0]
                     res_row = conn.execute(
-                        "SELECT broker_order_id, status, requested_quantity, filled_quantity, average_fill_price, fee, slippage FROM execution_results WHERE execution_intent_id = ?",
+                        "SELECT broker_order_id, status, requested_quantity, filled_quantity, average_fill_price, fee, slippage, reason_codes FROM execution_results WHERE execution_intent_id = ?",
                         (intent_id,)
                     ).fetchone()
                     if res_row:
+                        loaded_reasons = json.loads(res_row["reason_codes"])
+                        for r in reasons_list:
+                            if r not in loaded_reasons:
+                                loaded_reasons.append(r)
+                        if "IDEMPOTENT_REPLAY" not in loaded_reasons:
+                            loaded_reasons.append("IDEMPOTENT_REPLAY")
                         return ExecutionResult(
                             execution_intent_id=intent_id,
                             broker_order_id=res_row["broker_order_id"],
@@ -266,7 +322,7 @@ class PaperExecutor:
                             fee=float(res_row["fee"]),
                             slippage=float(res_row["slippage"]),
                             updated_at=datetime.now(UTC),
-                            reason_codes=["IDEMPOTENT_REPLAY"]
+                            reason_codes=loaded_reasons
                         )
 
                 # Fetch balance
@@ -285,9 +341,9 @@ class PaperExecutor:
                     active_cnt_row = conn.execute("SELECT COUNT(*) as cnt FROM paper_positions WHERE lane_id = ? AND quantity > 0", (lane_id,)).fetchone()
                     active_cnt = active_cnt_row["cnt"] if active_cnt_row else 0
                     if active_cnt >= max_open_positions:
-                        return self._reject_intent(conn, intent, "OPEN_POSITION_LIMIT")
+                        return self._reject_intent(conn, intent, "OPEN_POSITION_LIMIT", extra_reasons=reasons_list)
 
-                # G2 Slippage Dimensional Math: adjusted unit price is independent of quantity (no quadratic cost!)
+                # G2 Slippage Dimensional Math
                 slippage_factor = 1.0 + self.slippage_rate if intent.side == "BUY" else 1.0 - self.slippage_rate
                 adjusted_fill_price = fill_price * slippage_factor
                 
@@ -299,9 +355,9 @@ class PaperExecutor:
 
                 # Validate
                 if intent.side == "BUY" and cash < total_cost:
-                    return self._reject_intent(conn, intent, "INSUFFICIENT_CASH")
+                    return self._reject_intent(conn, intent, "INSUFFICIENT_CASH", extra_reasons=reasons_list)
                 if intent.side == "SELL" and current_qty < quantity:
-                    return self._reject_intent(conn, intent, "INSUFFICIENT_POSITION")
+                    return self._reject_intent(conn, intent, "INSUFFICIENT_POSITION", extra_reasons=reasons_list)
 
                 # Perform balance and position state updates
                 if intent.side == "BUY":
@@ -326,7 +382,7 @@ class PaperExecutor:
                             (new_qty, lane_id, intent.symbol)
                         )
 
-                # G4 Multi-Asset MTM: evaluate each position using its own fresh mark
+                # G4 Multi-Asset MTM
                 all_pos = conn.execute("SELECT symbol, quantity FROM paper_positions WHERE lane_id = ?", (lane_id,)).fetchall()
                 mtm_value = 0.0
                 for p in all_pos:
@@ -338,30 +394,31 @@ class PaperExecutor:
                     if not mark_row:
                         raise ValueError(f"No fresh market mark found for {sym}")
                     
-                    # Check age <= 90s (G4)
+                    # Check age <= 90s
                     try:
                         mark_time = datetime.fromisoformat(mark_row["updated_at"])
                     except ValueError:
                         mark_time = datetime.now(UTC)
                     if abs((datetime.now(UTC) - mark_time).total_seconds()) > 90.0:
-                        raise ValueError(f"Stale market mark for {sym} (Age: {abs((datetime.now(UTC) - mark_time).total_seconds())}s)")
+                        raise ValueError(f"Stale market mark for {sym}")
                         
                     mtm_value += qty * mark_row["price"]
 
                 new_equity = new_cash + mtm_value
                 conn.execute("UPDATE paper_balances SET cash = ?, equity = ? WHERE lane_id = ?", (new_cash, new_equity, lane_id))
 
-                # Insert Intent & Result
+                # Insert Intent & Result (atomically saving H2 reason codes)
                 broker_id = f"paper-{uuid.uuid4()}"
                 conn.execute(
                     "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, str(intent.time_exit_at), intent.client_order_id, str(intent.expires_at))
                 )
+                final_reasons = reasons_list + ["EXECUTED_PAPER"]
                 conn.execute(
                     "INSERT INTO execution_results (execution_intent_id, broker_order_id, status, requested_quantity, filled_quantity, average_fill_price, fee, slippage, reason_codes) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (intent.execution_intent_id, broker_id, "FILLED", intent.quantity, intent.quantity, adjusted_fill_price, fee, slippage_cost, "[]")
+                    (intent.execution_intent_id, broker_id, "FILLED", intent.quantity, intent.quantity, adjusted_fill_price, fee, slippage_cost, json.dumps(final_reasons))
                 )
                 self.db.sqlite_conn.commit()
 
@@ -378,11 +435,19 @@ class PaperExecutor:
                         if existing_intent:
                             intent_id = existing_intent["execution_intent_id"]
                             cur.execute(
-                                "SELECT broker_order_id, status, requested_quantity, filled_quantity, average_fill_price, fee, slippage FROM execution_results WHERE execution_intent_id = %s",
+                                "SELECT broker_order_id, status, requested_quantity, filled_quantity, average_fill_price, fee, slippage, reason_codes FROM execution_results WHERE execution_intent_id = %s",
                                 (intent_id,)
                             )
                             res_row = cur.fetchone()
                             if res_row:
+                                loaded_reasons = res_row["reason_codes"]
+                                if isinstance(loaded_reasons, str):
+                                    loaded_reasons = json.loads(loaded_reasons)
+                                for r in reasons_list:
+                                    if r not in loaded_reasons:
+                                        loaded_reasons.append(r)
+                                if "IDEMPOTENT_REPLAY" not in loaded_reasons:
+                                    loaded_reasons.append("IDEMPOTENT_REPLAY")
                                 return ExecutionResult(
                                     execution_intent_id=intent_id,
                                     broker_order_id=res_row["broker_order_id"],
@@ -393,7 +458,7 @@ class PaperExecutor:
                                     fee=float(res_row["fee"]),
                                     slippage=float(res_row["slippage"]),
                                     updated_at=datetime.now(UTC),
-                                    reason_codes=["IDEMPOTENT_REPLAY"]
+                                    reason_codes=loaded_reasons
                                 )
 
                         # Fetch balance
@@ -415,9 +480,9 @@ class PaperExecutor:
                             active_cnt_row = cur.fetchone()
                             active_cnt = active_cnt_row["cnt"] if active_cnt_row else 0
                             if active_cnt >= max_open_positions:
-                                return self._reject_intent_postgres(cur, intent, "OPEN_POSITION_LIMIT")
+                                return self._reject_intent_postgres(cur, intent, "OPEN_POSITION_LIMIT", extra_reasons=reasons_list)
 
-                        # G2 Slippage Dimensional Math: adjusted unit price is independent of quantity
+                        # G2 Slippage Dimensional Math
                         slippage_factor = 1.0 + self.slippage_rate if intent.side == "BUY" else 1.0 - self.slippage_rate
                         adjusted_fill_price = fill_price * slippage_factor
                         
@@ -429,9 +494,9 @@ class PaperExecutor:
 
                         # Validate
                         if intent.side == "BUY" and cash < total_cost:
-                            return self._reject_intent_postgres(cur, intent, "INSUFFICIENT_CASH")
+                            return self._reject_intent_postgres(cur, intent, "INSUFFICIENT_CASH", extra_reasons=reasons_list)
                         if intent.side == "SELL" and current_qty < quantity:
-                            return self._reject_intent_postgres(cur, intent, "INSUFFICIENT_POSITION")
+                            return self._reject_intent_postgres(cur, intent, "INSUFFICIENT_POSITION", extra_reasons=reasons_list)
 
                         # Perform state updates
                         if intent.side == "BUY":
@@ -457,7 +522,7 @@ class PaperExecutor:
                                     (new_qty, lane_id, intent.symbol)
                                 )
 
-                        # G4 Multi-Asset MTM: evaluate each position using its own fresh mark
+                        # G4 Multi-Asset MTM
                         cur.execute("SELECT symbol, quantity FROM paper_positions WHERE lane_id = %s", (lane_id,))
                         all_pos = cur.fetchall()
                         mtm_value = 0.0
@@ -471,27 +536,28 @@ class PaperExecutor:
                             if not mark_row:
                                 raise ValueError(f"No fresh market mark found for {sym}")
                             
-                            # Check age <= 90s (G4)
+                            # Check age <= 90s
                             mark_time = mark_row["updated_at"]
                             if abs((datetime.now(UTC) - mark_time).total_seconds()) > 90.0:
-                                raise ValueError(f"Stale market mark for {sym} (Age: {abs((datetime.now(UTC) - mark_time).total_seconds())}s)")
+                                raise ValueError(f"Stale market mark for {sym}")
                                 
                             mtm_value += qty * float(mark_row["price"])
 
                         new_equity = new_cash + mtm_value
                         cur.execute("UPDATE paper_balances SET cash = %s, equity = %s WHERE lane_id = %s", (new_cash, new_equity, lane_id))
 
-                        # Save Intent & Result
+                        # Save Intent & Result (atomically saving H2 reason codes)
                         broker_id = f"paper-{uuid.uuid4()}"
                         cur.execute(
                             "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at) "
                             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                             (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, intent.time_exit_at, intent.client_order_id, intent.expires_at)
                         )
+                        final_reasons = reasons_list + ["EXECUTED_PAPER"]
                         cur.execute(
                             "INSERT INTO execution_results (execution_intent_id, broker_order_id, status, requested_quantity, filled_quantity, average_fill_price, fee, slippage, reason_codes) "
-                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, '[]'::jsonb)",
-                            (intent.execution_intent_id, broker_id, "FILLED", intent.quantity, intent.quantity, adjusted_fill_price, fee, slippage_cost)
+                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                            (intent.execution_intent_id, broker_id, "FILLED", intent.quantity, intent.quantity, adjusted_fill_price, fee, slippage_cost, json.dumps(final_reasons))
                         )
 
             return ExecutionResult(
@@ -504,7 +570,7 @@ class PaperExecutor:
                 fee=fee,
                 slippage=slippage_cost,
                 updated_at=datetime.now(UTC),
-                reason_codes=["EXECUTED_PAPER"]
+                reason_codes=final_reasons
             )
         finally:
             if not self.db.use_sqlite:
@@ -512,7 +578,7 @@ class PaperExecutor:
 
     def check_and_trigger_stops(self, lane_id: str, symbol: str, current_price: float) -> ExecutionResult | None:
         """
-        Check stop loss / take profit triggers, executing protective exits instantly (HST-01 / HST-03).
+        Check stop loss / take profit triggers, executing protective exits instantly (HST-01 / HST-03 / H2).
         """
         pos = self.get_position(lane_id, symbol)
         if not pos or pos["quantity"] <= 0:
@@ -546,22 +612,23 @@ class PaperExecutor:
                 created_at=datetime.now(UTC),
                 expires_at=datetime.now(UTC)
             )
-            result = self.execute_intent(lane_id, intent, current_price)
-            result.reason_codes.append(reason)
+            # Pass protective reason as an atomic database reason (Blocker H2)
+            result = self.execute_intent(lane_id, intent, current_price, reasons=[reason])
             return result
         return None
 
-    def _reject_intent(self, conn, intent: ExecutionIntent, reason: str) -> ExecutionResult:
+    def _reject_intent(self, conn, intent: ExecutionIntent, reason: str, extra_reasons: list[str] | None = None) -> ExecutionResult:
         broker_id = "rejected-order"
         conn.execute(
             "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, str(intent.time_exit_at), intent.client_order_id, str(intent.expires_at))
         )
+        final_reasons = (extra_reasons or []) + [reason]
         conn.execute(
             "INSERT INTO execution_results (execution_intent_id, broker_order_id, status, requested_quantity, filled_quantity, fee, slippage, reason_codes) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (intent.execution_intent_id, broker_id, "REJECTED", intent.quantity, 0.0, 0.0, 0.0, f'["{reason}"]')
+            (intent.execution_intent_id, broker_id, "REJECTED", intent.quantity, 0.0, 0.0, 0.0, json.dumps(final_reasons))
         )
         if self.db.use_sqlite:
             self.db.sqlite_conn.commit()
@@ -572,20 +639,21 @@ class PaperExecutor:
             requested_quantity=intent.quantity,
             filled_quantity=0.0,
             updated_at=datetime.now(UTC),
-            reason_codes=[reason]
+            reason_codes=final_reasons
         )
 
-    def _reject_intent_postgres(self, cur, intent: ExecutionIntent, reason: str) -> ExecutionResult:
+    def _reject_intent_postgres(self, cur, intent: ExecutionIntent, reason: str, extra_reasons: list[str] | None = None) -> ExecutionResult:
         broker_id = "rejected-order"
         cur.execute(
             "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, intent.time_exit_at, intent.client_order_id, intent.expires_at)
         )
+        final_reasons = (extra_reasons or []) + [reason]
         cur.execute(
             "INSERT INTO execution_results (execution_intent_id, broker_order_id, status, requested_quantity, filled_quantity, fee, slippage, reason_codes) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (intent.execution_intent_id, broker_id, "REJECTED", intent.quantity, 0.0, 0.0, 0.0, f'["{reason}"]')
+            (intent.execution_intent_id, broker_id, "REJECTED", intent.quantity, 0.0, 0.0, 0.0, json.dumps(final_reasons))
         )
         return ExecutionResult(
             execution_intent_id=intent.execution_intent_id,
@@ -594,7 +662,7 @@ class PaperExecutor:
             requested_quantity=intent.quantity,
             filled_quantity=0.0,
             updated_at=datetime.now(UTC),
-            reason_codes=[reason]
+            reason_codes=final_reasons
         )
 
 
