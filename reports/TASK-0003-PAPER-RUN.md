@@ -2,7 +2,7 @@
 
 ## 1. Controlled Paper Run Summary
 - **Target Host**: GCP VPS `fondazione` (`35.239.91.187` / `100.96.230.80`)
-- **Active Code Commit SHA**: `ecfa93ac7b9a5280bba3cb6a53f064c5bc4f866b` (checked out on VPS `/opt/fondazione2`)
+- **Active Code Commit SHA**: `ecfa93ae2b70a039c52716fce03e7ba03819ef1b` (checked out on VPS `/opt/fondazione2`)
 - **Execution Date**: August 7th, 2026
 - **Runs Executed**: 3
 - **Asset / Lane**: `BTC/USDC` under `lane_1`
