@@ -1,0 +1,126 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Servizi monitorati",
+      "targets": [{"expr": "sum(up)", "legendFormat": "servizi attivi"}],
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "red"}, {"color": "green", "value": 2}]}}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0}
+    },
+    {
+      "type": "stat",
+      "title": "Equity totale paper",
+      "targets": [{"expr": "sum(foundation_lane_equity)", "legendFormat": "USDT"}],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 2}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0}
+    },
+    {
+      "type": "stat",
+      "title": "Decisioni ultime 24h",
+      "targets": [{"expr": "sum(increase(foundation_decisions_total[24h]))", "legendFormat": "decisioni"}],
+      "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0}
+    },
+    {
+      "type": "stat",
+      "title": "Posizioni aperte",
+      "targets": [{"expr": "sum(foundation_lane_open_positions)", "legendFormat": "posizioni"}],
+      "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0}
+    },
+    {
+      "type": "timeseries",
+      "title": "Equity per corsia",
+      "targets": [{"expr": "foundation_lane_equity", "legendFormat": "{{lane}}"}],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 2}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 5}
+    },
+    {
+      "type": "timeseries",
+      "title": "Rendimento per corsia",
+      "targets": [{"expr": "foundation_lane_return_pct", "legendFormat": "{{lane}}"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "decimals": 3}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 5}
+    },
+    {
+      "type": "timeseries",
+      "title": "Decisioni per azione",
+      "targets": [{"expr": "sum by (lane, action) (increase(foundation_decisions_total[30m]))", "legendFormat": "{{lane}} {{action}}"}],
+      "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 14}
+    },
+    {
+      "type": "timeseries",
+      "title": "Drawdown massimo",
+      "targets": [{"expr": "foundation_lane_max_drawdown_pct", "legendFormat": "{{lane}}"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "decimals": 3}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 14}
+    },
+    {
+      "type": "table",
+      "title": "Stato corrente corsie",
+      "targets": [
+        {"expr": "foundation_lane_equity", "legendFormat": "Equity {{lane}}", "instant": true},
+        {"expr": "foundation_lane_cash", "legendFormat": "Cash {{lane}}", "instant": true},
+        {"expr": "foundation_lane_fees", "legendFormat": "Fee {{lane}}", "instant": true}
+      ],
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 23}
+    },
+    {
+      "type": "table",
+      "title": "Release e strategie attive",
+      "targets": [
+        {"expr": "foundation_lane_strategy_info", "legendFormat": "{{lane}}", "instant": true, "format": "table"}
+      ],
+      "transformations": [
+        {"id": "organize", "options": {"excludeByName": {"Time": true, "Value": true, "__name__": true, "instance": true, "job": true}, "renameByName": {"lane": "Corsia", "strategy": "Strategia", "ai_enabled": "AI", "release_id": "Release"}}}
+      ],
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32}
+    },
+    {
+      "type": "timeseries",
+      "title": "Motivi delle decisioni",
+      "targets": [
+        {"expr": "sum by (reason) (increase(foundation_decision_reasons_total[6h]))", "legendFormat": "{{reason}}"}
+      ],
+      "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []},
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 40}
+    },
+    {
+      "type": "text",
+      "title": "Metodo e architettura",
+      "options": {
+        "mode": "markdown",
+        "content": "## Fondazione Semplice\nScarica il documento completo sul metodo, le cinque strategie, l'architettura hardware e i motori decisionali.\n\n[Scarica il PDF](/fondazione-semplice-metodo.pdf)"
+      },
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 49}
+    },
+    {
+      "type": "table",
+      "title": "Prima mossa per corsia",
+      "targets": [
+        {"expr": "sum by (lane) (foundation_decisions_total)", "legendFormat": "{{lane}}", "instant": true, "format": "table"}
+      ],
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 56}
+    },
+    {
+      "type": "stat",
+      "title": "Sonde bootstrap eseguite",
+      "targets": [
+        {"expr": "sum(increase(foundation_decision_reasons_total{reason=\"BOOTSTRAP_PROBE\"}[24h]))", "legendFormat": "BUY iniziali"}
+      ],
+      "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []},
+      "gridPos": {"h": 5, "w": 24, "x": 0, "y": 64}
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["fondazione", "paper"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "title": "Fondazione Semplice - Overview",
+  "uid": "fondazione-overview",
+  "version": 1
+}

@@ -1,0 +1,266 @@
+name: fondazione2
+
+x-common: &common
+  restart: unless-stopped
+  networks: [foundation]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  # 1. Database (PostgreSQL Canonical Event Ledger)
+  postgres:
+    <<: *common
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fondazione}
+      POSTGRES_USER: ${POSTGRES_USER:-fondazione}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fondazionepassword}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./database/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # 2. Redis Cache (with LRU eviction for transient candles and data)
+  redis-cache:
+    <<: *common
+    image: redis:7-alpine
+    command: redis-server --maxmemory 1gb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-cache-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+
+  # 3. Redis Jobs (with AOF persistence and noeviction for Celery workers)
+  redis-jobs:
+    <<: *common
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory-policy noeviction
+    volumes:
+      - redis-jobs-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+
+  # 4. Decision Aggregator and Risk Engine Service
+  decision-service:
+    <<: *common
+    build:
+      context: ./services/decision-service
+    environment:
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      LIVE_ENABLED: ${LIVE_ENABLED:-false}
+      LIVE_CONFIRMATION: ${LIVE_CONFIRMATION:-}
+      DECISION_API_KEY: ${DECISION_API_KEY:-decisionkey}
+      AI_BACKEND: ${AI_BACKEND:-mock}
+      KRONOS_URL: ${KRONOS_URL:-http://kronos:8081}
+      NEMOTRON_URL: ${NEMOTRON_URL:-http://nemotron:30000/v1}
+      NEMOTRON_MODEL: ${NEMOTRON_MODEL:-nvidia/NVIDIA-Nemotron-Nano-9B-v2}
+      DECISION_TIMEOUT_SECONDS: ${DECISION_TIMEOUT_SECONDS:-60}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://fondazione:fondazionepassword@postgres:5432/fondazione}
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kronos:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  # 5. Kronos Forecasting Service (CPU-first, using NeoQuasar/Kronos-base)
+  kronos:
+    <<: *common
+    build:
+      context: ./services/kronos
+    environment:
+      KRONOS_BACKEND: ${KRONOS_BACKEND:-real}
+      KRONOS_MODEL: NeoQuasar/Kronos-base
+      KRONOS_TOKENIZER: NeoQuasar/Kronos-Tokenizer-base
+      HF_HOME: /models/kronos-huggingface
+    volumes:
+      - model-cache:/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/healthz')"]
+      interval: 20s
+      timeout: 5s
+      retries: 15
+      start_period: 120s
+
+  # 6. Nemotron Model Server (GPU Profile running SGLang on NVIDIA L4)
+  nemotron:
+    <<: *common
+    profiles: [gpu]
+    image: lmsysorg/sglang:v0.5.15.post1
+    command:
+      - python3
+      - -m
+      - sglang.launch_server
+      - --model-path
+      - nvidia/NVIDIA-Nemotron-Nano-9B-v2
+      - --host
+      - 0.0.0.0
+      - --port
+      - "30000"
+      - --mem-fraction-static
+      - ${SGLANG_MEM_FRACTION:-0.88}
+      - --trust-remote-code
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /models/huggingface
+    volumes:
+      - model-cache:/models
+    ipc: host
+    shm_size: 16gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ports:
+      - "127.0.0.1:30000:30000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:30000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 300s
+
+  # 7. Nemotron Mock Server (CPU Profile)
+  nemotron-mock:
+    <<: *common
+    profiles: [mock]
+    build:
+      context: ./services/nemotron-mock
+    ports:
+      - "127.0.0.1:30000:30000"
+
+  # 8. QuantDinger API
+  quantdinger-api:
+    <<: *common
+    image: ghcr.io/OpenByteInc/quantdinger-backend:v5.0.15
+    command: gunicorn -c gunicorn_config.py run:app
+    environment:
+      DATABASE_URL: postgresql://fondazione:fondazionepassword@postgres:5432/fondazione
+      REDIS_CACHE_URL: redis://redis-cache:6379/0
+      REDIS_JOBS_URL: redis://redis-jobs:6379/0
+      DECISION_SERVICE_URL: http://decision-service:8080
+      TRADING_MODE: paper
+      LIVE_ARMED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+      redis-jobs:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8082:8000"
+
+  # 9. QuantDinger Trading Worker
+  quantdinger-worker:
+    <<: *common
+    image: ghcr.io/OpenByteInc/quantdinger-backend:v5.0.15
+    command: python -m app.commands.trading_worker
+    environment:
+      DATABASE_URL: postgresql://fondazione:fondazionepassword@postgres:5432/fondazione
+      REDIS_CACHE_URL: redis://redis-cache:6379/0
+      REDIS_JOBS_URL: redis://redis-jobs:6379/0
+      DECISION_SERVICE_URL: http://decision-service:8080
+      TRADING_MODE: paper
+      LIVE_ARMED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # 10. QuantDinger Scheduler
+  quantdinger-scheduler:
+    <<: *common
+    image: ghcr.io/OpenByteInc/quantdinger-backend:v5.0.15
+    command: python -m app.commands.scheduler
+    environment:
+      DATABASE_URL: postgresql://fondazione:fondazionepassword@postgres:5432/fondazione
+      REDIS_CACHE_URL: redis://redis-cache:6379/0
+      REDIS_JOBS_URL: redis://redis-jobs:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # 11. QuantDinger Celery Worker (Asynchronous backtests & AI)
+  quantdinger-celery:
+    <<: *common
+    image: ghcr.io/OpenByteInc/quantdinger-backend:v5.0.15
+    command: celery -A app.celery_app:celery_app worker --loglevel=info
+    environment:
+      DATABASE_URL: postgresql://fondazione:fondazionepassword@postgres:5432/fondazione
+      REDIS_CACHE_URL: redis://redis-cache:6379/0
+      REDIS_JOBS_URL: redis://redis-jobs:6379/0
+    depends_on:
+      redis-jobs:
+        condition: service_healthy
+
+  # 12. QuantDinger Celery Beat (Schedules and periodic tasks)
+  quantdinger-celery-beat:
+    <<: *common
+    image: ghcr.io/OpenByteInc/quantdinger-backend:v5.0.15
+    command: celery -A app.celery_app:celery_app beat --loglevel=info
+    environment:
+      DATABASE_URL: postgresql://fondazione:fondazionepassword@postgres:5432/fondazione
+      REDIS_CACHE_URL: redis://redis-cache:6379/0
+      REDIS_JOBS_URL: redis://redis-jobs:6379/0
+    depends_on:
+      redis-jobs:
+        condition: service_healthy
+
+  # 13. Prometheus Scraper for observability
+  prometheus:
+    <<: *common
+    profiles: [observability]
+    image: prom/prometheus:v2.54.1
+    command: [--config.file=/etc/prometheus/prometheus.yml, --storage.tsdb.path=/prometheus]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  # 14. Grafana Dashboards
+  grafana:
+    <<: *common
+    profiles: [observability]
+    image: grafana/grafana:11.2.2
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-grafanapassword}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  # 15. Caddy Edge Gateway
+  gateway:
+    <<: *common
+    image: caddy:2.10.2-alpine
+    volumes:
+      - ./monitoring/Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
+
+networks:
+  foundation:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-cache-data:
+  redis-jobs-data:
+  prometheus-data:
+  model-cache:
