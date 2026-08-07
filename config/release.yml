@@ -1,11 +1,11 @@
-version: 1
-release_id: bootstrap-paper-v1.4
-created_at: "2026-08-07T11:45:00+02:00"
-description: Bootstrap paper con smoke ledger isolato e sonda iniziale deterministica.
+version: 2
+release_id: fondazione2-baseline-paper
+created_at: "2026-08-07T16:00:00+02:00"
+description: Fondazione2 clean paper baseline with direct QuantDinger and Decision integration.
 bootstrap_probe:
-  enabled: true
+  enabled: false
   symbol: BTC/USDT
   request_id_prefix: coinbase-BTC-USDT-
-  allocation_pct: 1.0
-  stop_loss_pct: 1.0
-  take_profit_pct: 1.8
+  allocation_pct: 0.0
+  stop_loss_pct: 0.0
+  take_profit_pct: 0.0

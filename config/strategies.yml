@@ -1,42 +1,10 @@
-version: 1
+version: 2
 lanes:
   lane_1:
-    name: kronos_nemotron_conservative
+    name: fondazione2_baseline_lane
     ai_enabled: true
-    minimum_confidence: 0.75
-    max_position_pct: 10
-    max_daily_loss_pct: 2
-    max_open_positions: 2
-    cooldown_minutes: 30
-  lane_2:
-    name: kronos_nemotron_aggressive
-    ai_enabled: true
-    minimum_confidence: 0.60
-    max_position_pct: 20
-    max_daily_loss_pct: 4
-    max_open_positions: 4
-    cooldown_minutes: 10
-  lane_3:
-    name: kronos_quant_only
-    ai_enabled: false
     minimum_confidence: 0.70
-    max_position_pct: 12
-    max_daily_loss_pct: 2.5
-    max_open_positions: 3
-    cooldown_minutes: 20
-  lane_4:
-    name: technical_baseline
-    ai_enabled: false
-    minimum_confidence: 0.65
     max_position_pct: 10
     max_daily_loss_pct: 2
-    max_open_positions: 2
-    cooldown_minutes: 20
-  lane_5:
-    name: experimental_agent
-    ai_enabled: true
-    minimum_confidence: 0.68
-    max_position_pct: 8
-    max_daily_loss_pct: 1.5
     max_open_positions: 2
     cooldown_minutes: 30

@@ -10,7 +10,7 @@ REPOSITORY_REF="openclaw/task-0002-clean-rebuild"
 
 usage() {
   cat <<'EOF'
-Usage: sudo ./scripts/install_fondazione2.sh --confirm ERASE_OLD_FOUNDATION_AND_INSTALL_FONDAZIONE2_WITHOUT_BACKUP
+Usage: sudo ./scripts/install_fondazione2.sh --confirm ERASE_OLD_FOUNDATION_AND_INSTALL_FONDAZIONE2_WITHOUT_BACKUP [--ref REBUILD_COMMIT_HASH]
 
 Executes a complete clean wipe of the legacy fondazionesemplice stack on the verified GCP VPS,
 sets up the Fondazione2 production directory (/opt/fondazione2), configures secure keys,
@@ -21,6 +21,7 @@ EOF
 while (($#)); do
   case "$1" in
     --confirm) CONFIRM="${2:-}"; shift 2 ;;
+    --ref) REPOSITORY_REF="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -149,4 +150,3 @@ echo "=========================================================="
 echo "Fondazione2 Rebuild Complete & Verified!"
 echo "Baseline running in PAPER-FIRST mode. Live trading is DISARMED."
 echo "=========================================================="
-EOF

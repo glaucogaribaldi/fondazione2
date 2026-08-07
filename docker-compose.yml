@@ -11,9 +11,9 @@ services:
     <<: *common
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-fondazione}
-      POSTGRES_USER: ${POSTGRES_USER:-fondazione}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fondazionepassword}
+      POSTGRES_DB: ${POSTGRES_DB:?postgres db required}
+      POSTGRES_USER: ${POSTGRES_USER:?postgres user required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?postgres password required}
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./database/migrations:/docker-entrypoint-initdb.d:ro
@@ -51,16 +51,16 @@ services:
     build:
       context: ./services/decision-service
     environment:
-      TRADING_MODE: ${TRADING_MODE:-paper}
-      LIVE_ENABLED: ${LIVE_ENABLED:-false}
+      TRADING_MODE: ${TRADING_MODE:?trading mode required}
+      LIVE_ENABLED: ${LIVE_ENABLED:?live enabled required}
       LIVE_CONFIRMATION: ${LIVE_CONFIRMATION:-}
-      DECISION_API_KEY: ${DECISION_API_KEY:-decisionkey}
-      AI_BACKEND: ${AI_BACKEND:-mock}
+      DECISION_API_KEY: ${DECISION_API_KEY:?decision api key required}
+      AI_BACKEND: ${AI_BACKEND:?ai backend required}
       KRONOS_URL: ${KRONOS_URL:-http://kronos:8081}
       NEMOTRON_URL: ${NEMOTRON_URL:-http://nemotron:30000/v1}
       NEMOTRON_MODEL: ${NEMOTRON_MODEL:-nvidia/NVIDIA-Nemotron-Nano-9B-v2}
       DECISION_TIMEOUT_SECONDS: ${DECISION_TIMEOUT_SECONDS:-60}
-      DATABASE_URL: ${DATABASE_URL:-postgresql://fondazione:fondazionepassword@postgres:5432/fondazione}
+      DATABASE_URL: ${DATABASE_URL:?database url required}
     volumes:
       - ./config:/app/config:ro
     depends_on:
@@ -238,8 +238,8 @@ services:
     profiles: [observability]
     image: grafana/grafana:11.2.2
     environment:
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-grafanapassword}
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:?grafana admin user required}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?grafana admin password required}
       GF_USERS_ALLOW_SIGN_UP: "false"
     ports:
       - "127.0.0.1:3000:3000"

@@ -1,7 +1,7 @@
 version: 1
 global:
   allowed_symbols: [BTC/USDC, ETH/USDC, BTC/USDT, ETH/USDT]
-  allowed_actions: [BUY, SELL, HOLD]
+  allowed_actions: [NO_TRADE, OPEN, ADD, REDUCE, CLOSE]
   max_allocation_pct: 20
   max_spread_bps: 35
   max_market_age_seconds: 90

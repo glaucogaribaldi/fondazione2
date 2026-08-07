@@ -9,6 +9,7 @@ LIVE_CONFIRMATION_PHRASE = "I_UNDERSTAND_LIVE_TRADING_CAN_LOSE_MONEY"
 @dataclass(frozen=True)
 class RiskSettings:
     allowed_symbols: frozenset[str]
+    allowed_actions: frozenset[str] = frozenset({"NO_TRADE", "OPEN", "ADD", "REDUCE", "CLOSE"})
     max_allocation_pct: float = 20
     max_spread_bps: float = 35
     max_market_age_seconds: int = 90
@@ -62,6 +63,10 @@ def evaluate_risk(
     # 1. Symbol restriction
     if request.symbol not in global_settings.allowed_symbols:
         reasons.append("SYMBOL_NOT_ALLOWED")
+
+    # 1b. Action restriction
+    if proposal.action not in global_settings.allowed_actions:
+        reasons.append("ACTION_NOT_ALLOWED")
 
     # 2. Market data freshness (HST-05)
     if market_age < -5 or market_age > global_settings.max_market_age_seconds:

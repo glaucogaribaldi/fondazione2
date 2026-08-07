@@ -18,6 +18,7 @@ def load_risk_settings() -> RiskSettings:
     values = _load_yaml("risk.yml")["global"]
     return RiskSettings(
         allowed_symbols=frozenset(values["allowed_symbols"]),
+        allowed_actions=frozenset(values.get("allowed_actions", ["NO_TRADE", "OPEN", "ADD", "REDUCE", "CLOSE"])),
         max_allocation_pct=float(values["max_allocation_pct"]),
         max_spread_bps=float(values["max_spread_bps"]),
         max_market_age_seconds=int(values["max_market_age_seconds"]),

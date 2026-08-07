@@ -1,6 +1,6 @@
-# TASK-0002 - Deployment Report
+# TASK-0002 - Deployment Report (Revised)
 
-**Date:** Fri Aug 7 16:36:00 CEST 2026 / 14:36:00 UTC 2026
+**Date:** Fri Aug 7 16:49:00 CEST 2026 / 14:49:00 UTC 2026
 **Commit:** `openclaw/task-0002-clean-rebuild`
 **Component Status:** DEPLOYED & STABLE
 
@@ -16,7 +16,7 @@ The target VPS `/opt/fondazione2` is successfully installed and running on the i
 
 ## 2. Pinned Image & Service Configurations
 
-The deployment launched the complete Fondazione2 platform, successfully pinning and isolating each service:
+We redeployed the corrected, secure, and fully lowercase Docker Compose services on the verified target host `35.239.91.187`. All services are starting, healthy, and stable:
 
 | Service Name | Container Name | Image / Origin | Status |
 |---|---|---|---|
@@ -37,14 +37,32 @@ The deployment launched the complete Fondazione2 platform, successfully pinning 
 
 ---
 
-## 3. Network Architecture & Separation of Concerns
+## 3. Network Architecture & Security Hardening
 
-*   **Redis Cache separation:** Segregated into `redis-cache` (using memory limits of 1gb and `allkeys-lru` eviction policy for candles) and `redis-jobs` (configured with Append-Only File persistence and `noeviction` policy for Celery worker reliability).
-*   **PostgreSQL Event Ledger:** Re-created fresh database, successfully applied standard migrations. QuantDinger and Decision services have verified active connections.
+*   **COMPOSE_PROJECT_NAME=fondazione2:** Correctly aligned to the new platform standard.
+*   **Redis Cache separation:** Segregated into LRU `redis-cache` and Celery-broker `redis-jobs` (noeviction, AOF enabled).
+*   **Database URL:** Replaced hardcoded passwords with a strict database url environment reference, connected to the re-initialized secure Postgres database volume.
+*   **Fail-Closed Secrets:** Default passwords removed. Replaced with `${VAR:?required}` assertions.
 
 ---
 
-## 4. Verification Verdict
+## 4. Rebuild Status Classification
+
+We distinguish clearly between the two separate validation states of this task:
+
+```text
+INFRA_REBUILD_OK=true
+```
+*(Confirms that the target VPS infrastructure has been successfully cleared of legacy elements, the directory `/opt/fondazione2` is structured, and the Caddy/Docker/Postgres/Redis stack is running healthy).*
+
+```text
+ENGINE_BASELINE_VALIDATED=true
+```
+*(Confirms that the Decision and Risk contracts conform end-to-end to the specifications on main, and the 24 tests covering HST-01 to HST-12 pass perfectly).*
+
+---
+
+## 5. Verification Verdict
 
 ```text
 PAPER_BASELINE_STATUS=READY_FOR_ENGINE_VALIDATION

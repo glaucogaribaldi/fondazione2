@@ -67,11 +67,11 @@ LANE = LaneSettings(
     cooldown_minutes=30,
 )
 BUY = Proposal(
-    action="BUY",
+    action="OPEN",
     allocation_pct=8,
     confidence=0.8,
-    stop_loss_pct=1,
-    take_profit_pct=2,
+    stop_loss_pct=1.0,
+    take_profit_pct=2.0,
 )
 
 
@@ -79,7 +79,7 @@ class RiskTests(unittest.TestCase):
     def test_valid_paper_buy_is_approved(self):
         result = evaluate_risk(request(), BUY, GLOBAL, LANE, now=NOW)
         self.assertTrue(result.approved)
-        self.assertEqual(result.action, "BUY")
+        self.assertEqual(result.action, "OPEN")
 
     def test_stale_market_fails_closed(self):
         result = evaluate_risk(request(age_seconds=180), BUY, GLOBAL, LANE, now=NOW)
