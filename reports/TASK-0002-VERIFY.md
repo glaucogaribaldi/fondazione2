@@ -1,7 +1,7 @@
 # TASK-0002 - Verification Report (Revised)
 
-**Date:** Fri Aug 7 20:15:00 CEST 2026 / 18:15:00 UTC 2026
-**Commit:** `3697c3abe8e24399e945d446473e37dd37548365`
+**Date:** Fri Aug 7 23:59:00 CEST 2026 / 21:59:00 UTC 2026
+**Commit:** `a147d85fdabc637404b9e260a8fddd4397b384b6`
 **Component Status:** VERIFIED & CERTIFIED
 
 ---
@@ -29,6 +29,23 @@ We have implemented explicit, robust, and real PostgreSQL-backed (with SQLite te
 *   **[PASS] HST-10 - Model failure is fail-safe:** Verified that missing or invalid model outputs correctly result in fail-closed `NO_TRADE` states.
 *   **[PASS] HST-11 - Paper/live semantic parity:** Verified that paper and live modes follow identical execution logic, with live requiring separate authorization controls (`LIVE_TRADING_LOCKED` block).
 *   **[PASS] HST-12 - Paper certification gate:** Validates the schema and database connection integrity and maps symbols through `CoinbasePublicAdapter` using the official, unauthenticated Coinbase Exchange API.
+
+---
+
+### Target GCP VPS Identity Evidence (Blocker J1 Verified)
+A strict, fail-closed target identity verification check has been successfully integrated into `scripts/preflight.sh` using GCE Metadata APIs to prevent any deployment or destructive operations on unauthorized hosts.
+
+**Execution output on VPS `fondazione`:**
+```text
+=== Verifying Target Cloud Identity ===
+Discovered GCP Instance details:
+- Instance Name: fondazione
+- Zone: us-central1-a
+- Internal IP: 10.128.0.16
+- Public IP: 35.239.91.187
+Target cloud identity successfully verified!
+Preflight passed.
+```
 
 ---
 

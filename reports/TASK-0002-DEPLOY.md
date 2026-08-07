@@ -1,7 +1,7 @@
 # TASK-0002 - Deployment Report (Revised)
 
-**Date:** Fri Aug 7 20:15:00 CEST 2026 / 18:15:00 UTC 2026
-**Commit:** `3697c3abe8e24399e945d446473e37dd37548365`
+**Date:** Fri Aug 7 23:59:00 CEST 2026 / 21:59:00 UTC 2026
+**Commit:** `a147d85fdabc637404b9e260a8fddd4397b384b6`
 **Component Status:** DEPLOYED & STABLE
 
 ---
@@ -9,7 +9,7 @@
 ## 1. Deployed Commit Reference
 
 The target VPS `/opt/fondazione2` is successfully installed and running on the immutable git commit of the `openclaw/task-0002-clean-rebuild` branch:
-*   **Active Deployed Commit:** `3697c3abe8e24399e945d446473e37dd37548365`
+*   **Active Deployed Commit:** `a147d85fdabc637404b9e260a8fddd4397b384b6`
 *   **Target Directory:** `/opt/fondazione2`
 
 ---
