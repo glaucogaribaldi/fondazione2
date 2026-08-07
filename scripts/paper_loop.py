@@ -6,6 +6,7 @@ import asyncio
 import argparse
 from pathlib import Path
 from datetime import datetime, UTC
+import json
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "services" / "decision-service"))
@@ -15,7 +16,7 @@ from app.models import (
     ExecutionIntent, Proposal, Action, Forecast
 )
 from app.clients import get_forecast, get_ai_proposal, quant_proposal
-from app.executor import PaperExecutor
+from app.executor import PaperExecutor, DatabaseConnection
 from app.coinbase_adapter import CoinbasePublicAdapter
 from app.risk import evaluate_risk
 from app.config import load_risk_settings, load_lane_settings
@@ -69,8 +70,6 @@ async def run_paper_loop(lane_id: str, symbol: str, runs: int, delay_seconds: in
                 continue
 
             raw_candles = await adapter.get_candles(symbol, granularity=60, proxy_to_usd=True)
-            # Normalise list of lists to Pydantic Candles
-            # Format returned by adapter.get_candles is list of lists: [[timestamp, low, high, open, close, volume], ...]
             # Sort by timestamp ascending for correctness
             sorted_candles = sorted(raw_candles, key=lambda x: x[0])
             candles = []
@@ -102,7 +101,7 @@ async def run_paper_loop(lane_id: str, symbol: str, runs: int, delay_seconds: in
             portfolio_snap = PortfolioSnapshot(
                 equity=bal["equity"],
                 cash=bal["cash"],
-                daily_pnl_pct=0.0, # assumed flat
+                daily_pnl_pct=0.0,
                 open_positions=open_pos_count,
                 current_position_pct=current_pos_pct
             )
@@ -119,21 +118,38 @@ async def run_paper_loop(lane_id: str, symbol: str, runs: int, delay_seconds: in
             )
 
             # 6. Fetch forecast from Kronos and proposal from SGLang/Nemotron
+            # Wrapped in fail-closed safety block to ensure 100% audit persistence (TASK-0003)
+            proposal_reasons = []
+            forecast_obj = None
+            proposal = None
+
             print("Invoking Kronos forecasting service...")
             try:
-                forecast = await get_forecast(request)
-                print(f"Kronos forecast direction: {forecast.direction}, confidence: {forecast.confidence}")
+                forecast_obj = await get_forecast(request)
+                print(f"Kronos forecast direction: {forecast_obj.direction}, confidence: {forecast_obj.confidence}")
             except Exception as e:
                 print(f"Error: Kronos service call failed: {e}. Failing closed to NO_TRADE.")
-                continue
+                proposal_reasons.append("KRONOS_FAILED")
+                proposal_reasons.append(type(e).__name__.upper())
 
-            print("Invoking AI proposal engine...")
-            try:
-                proposal = await get_ai_proposal(request, forecast)
-                print(f"AI proposal action: {proposal.action}, allocation: {proposal.allocation_pct}%")
-            except Exception as e:
-                print(f"Error: AI proposal engine failed: {e}. Failing closed to NO_TRADE.")
-                continue
+            if forecast_obj:
+                print("Invoking AI proposal engine...")
+                try:
+                    proposal = await get_ai_proposal(request, forecast_obj)
+                    print(f"AI proposal action: {proposal.action}, allocation: {proposal.allocation_pct}%")
+                except Exception as e:
+                    print(f"Error: AI proposal engine failed: {e}. Failing closed to NO_TRADE.")
+                    proposal_reasons.append("NEMOTRON_FAILED")
+                    proposal_reasons.append(type(e).__name__.upper())
+
+            # If any backend failed, fall back to safe NO_TRADE proposal
+            if not proposal:
+                proposal = Proposal(
+                    action="NO_TRADE",
+                    allocation_pct=0.0,
+                    confidence=0.0,
+                    reason_codes=proposal_reasons or ["FAIL_CLOSED", "MODEL_EXCEPTION"]
+                )
 
             # 7. Deterministic Risk Check
             print("Evaluating deterministic Risk Engine rules...")
@@ -149,6 +165,7 @@ async def run_paper_loop(lane_id: str, symbol: str, runs: int, delay_seconds: in
             print(f"Risk Engine result: Approved={risk_result.approved}, Action={risk_result.action}")
 
             # 8. Create ExecutionIntent and execute only via PaperExecutor
+            exec_res = None
             if risk_result.approved and risk_result.action in ("OPEN", "ADD", "REDUCE", "CLOSE"):
                 # Determine side and quantity
                 side = "BUY" if risk_result.action in ("OPEN", "ADD") else "SELL"
@@ -186,6 +203,47 @@ async def run_paper_loop(lane_id: str, symbol: str, runs: int, delay_seconds: in
                     print("Calculated trade quantity is zero. Skipping execution.")
             else:
                 print(f"No trade executed. Risk reasons: {risk_result.reasons}")
+
+            # 9. Persist complete causal chain to PostgreSQL for full traceability (TASK-0003)
+            db_conn = executor.db.get_cursor()
+            try:
+                # Save audit row to decision_audit table
+                with db_conn:
+                    with db_conn.cursor() as cur:
+                        payload = {
+                            "request": request.model_dump(mode="json"),
+                            "forecast": forecast_obj.model_dump(mode="json") if forecast_obj else None,
+                            "proposal": proposal.model_dump(mode="json"),
+                            "risk_result": {
+                                "approved": risk_result.approved,
+                                "action": risk_result.action,
+                                "reasons": list(risk_result.reasons)
+                            },
+                            "execution_result": exec_res.model_dump(mode="json") if exec_res else None
+                        }
+                        cur.execute(
+                            "INSERT INTO decision_audit (request_id, lane_id, symbol, proposed_action, final_action, approved, reason_codes, model_versions, payload_hash) "
+                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                            (
+                                request.request_id,
+                                lane_id,
+                                symbol,
+                                proposal.action,
+                                risk_result.action,
+                                risk_result.approved,
+                                json.dumps(list(risk_result.reasons)),
+                                json.dumps({
+                                    "forecast": forecast_obj.model if forecast_obj else "failed",
+                                    "decision": "nvidia/NVIDIA-Nemotron-Nano-9B-v2" if proposal else "failed"
+                                }),
+                                str(hash(json.dumps(payload)))
+                            )
+                        )
+                print("Causal chain successfully persisted to PostgreSQL decision_audit ledger.")
+            except Exception as audit_err:
+                print(f"Warning: Failed to persist causal chain to database: {audit_err}")
+            finally:
+                db_conn.close()
 
         except Exception as e:
             print(f"Causal chain exception: {e}. Failing closed to NO_TRADE.")

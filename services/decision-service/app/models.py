@@ -64,8 +64,8 @@ class Forecast(BaseModel):
 
 class Proposal(BaseModel):
     action: Action
-    allocation_pct: float = Field(ge=0, le=100)
-    confidence: float = Field(ge=0, le=1)
+    allocation_pct: float = Field(default=0.0, ge=0, le=100)
+    confidence: float = Field(default=0.0, ge=0, le=1)
     stop_loss_pct: float | None = Field(default=None, gt=0)
     take_profit_pct: float | None = Field(default=None, gt=0)
     reason_codes: list[str] = Field(default_factory=list)
