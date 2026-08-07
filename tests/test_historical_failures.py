@@ -157,9 +157,9 @@ class HistoricalFailuresTests(unittest.TestCase):
         No silent skips. Environment must supply TEST_POSTGRES_URL.
         Asserts exactly one successful OPEN and one specific rejection or serialization failure.
         """
-        pg_url = os.getenv("TEST_POSTGRES_URL")
+        pg_url = os.getenv("TEST_POSTGRES_URL") or os.getenv("DATABASE_URL")
         if not pg_url:
-            self.fail("TEST_POSTGRES_URL environment variable is mandatory and must be set for PostgreSQL concurrency certification.")
+            self.fail("TEST_POSTGRES_URL or DATABASE_URL environment variable is mandatory and must be set for PostgreSQL concurrency certification.")
 
         # Recreate test schema on real test PostgreSQL
         try:
