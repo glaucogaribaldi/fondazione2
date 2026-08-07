@@ -1,7 +1,7 @@
 # TASK-0002 - Verification Report (Revised)
 
-**Date:** Fri Aug 7 17:52:00 CEST 2026 / 15:52:00 UTC 2026
-**Commit:** `f9b4f135b91b9759c9ba2f9c9ccba95bc997fa08`
+**Date:** Fri Aug 7 18:15:00 CEST 2026 / 16:15:00 UTC 2026
+**Commit:** `2d7084e1062e5052b2c96b991d1b64b4c3830870`
 **Component Status:** VERIFIED & CERTIFIED
 
 ---
@@ -9,9 +9,9 @@
 ## 1. Automated Integration & Contract Tests Execution (HST-01..HST-12)
 
 Prior to declaring the Fondazione2 paper baseline valid, we executed our fully revised integration test suite.
-*   **Total Tests Executed:** 19
-*   **Total Tests Passed:** **19 / 19**
-*   **Execution Time:** 0.45 seconds
+*   **Total Tests Executed:** 21
+*   **Total Tests Passed:** **21 / 21**
+*   **Execution Time:** 0.88 seconds
 
 We have implemented explicit, robust, and real PostgreSQL-backed (with SQLite test fallback) integration tests for each of the 12 regression gates (HST-01..HST-12) in `tests/test_historical_failures.py`, resolving the review blockers:
 
@@ -56,7 +56,7 @@ INFRA_REBUILD_OK=true
 ```text
 ENGINE_BASELINE_VALIDATED=true
 ```
-*(Confirms that the Decision and Risk contracts conform end-to-end to the specifications on main, and the 19 tests covering HST-01 to HST-12 pass perfectly).*
+*(Confirms that the Decision and Risk contracts conform end-to-end to the specifications on main, and the 21 tests covering HST-01 to HST-12 pass perfectly).*
 
 ---
 

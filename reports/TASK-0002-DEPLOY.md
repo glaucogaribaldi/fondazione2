@@ -1,7 +1,7 @@
 # TASK-0002 - Deployment Report (Revised)
 
-**Date:** Fri Aug 7 17:50:00 CEST 2026 / 15:50:00 UTC 2026
-**Commit:** `f9b4f135b91b9759c9ba2f9c9ccba95bc997fa08`
+**Date:** Fri Aug 7 18:15:00 CEST 2026 / 16:15:00 UTC 2026
+**Commit:** `2d7084e1062e5052b2c96b991d1b64b4c3830870`
 **Component Status:** DEPLOYED & STABLE
 
 ---
@@ -9,7 +9,7 @@
 ## 1. Deployed Commit Reference
 
 The target VPS `/opt/fondazione2` is successfully installed and running on the immutable git commit of the `openclaw/task-0002-clean-rebuild` branch:
-*   **Active Deployed Commit:** `f9b4f135b91b9759c9ba2f9c9ccba95bc997fa08`
+*   **Active Deployed Commit:** `2d7084e1062e5052b2c96b991d1b64b4c3830870`
 *   **Target Directory:** `/opt/fondazione2`
 
 ---
@@ -58,7 +58,7 @@ INFRA_REBUILD_OK=true
 ```text
 ENGINE_BASELINE_VALIDATED=true
 ```
-*(Confirms that the Decision and Risk contracts conform end-to-end to the specifications on main, and the 19 integration tests covering HST-01 to HST-12 pass perfectly).*
+*(Confirms that the Decision and Risk contracts conform end-to-end to the specifications on main, and the 21 integration tests covering HST-01 to HST-12 pass perfectly).*
 
 ---
 

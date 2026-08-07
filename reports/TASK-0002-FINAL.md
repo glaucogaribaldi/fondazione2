@@ -26,14 +26,14 @@ There are no private Coinbase credentials present in the environment or codebase
    - Added a safe, disarmed `CoinbaseLiveExecutor` that strictly raises a `RuntimeError` and rejects order attempts if any live trade is triggered, ensuring fail-closed safety.
 5. **Robust Automated Acceptance Testing**:
    - `tests/test_historical_failures.py` was rewritten from scratch to run real, executable integration and regression tests for all 12 gates (HST-01 to HST-12).
-   - 19 out of 19 tests successfully pass both locally on `u50-tre` and on the target VPS.
+   - 21 out of 21 tests successfully pass both locally on `u50-tre` and on the target VPS.
 6. **Immutable Automated Installer**:
    - Pinning and checking out precise, immutable git commit hashes is fully integrated.
    - Cleans up active postgres/redis volumes during reinstall to prevent auth mismatches.
 
 ## Deployment Metadata
 - **Target Host**: GCP VPS `fondazione` (`35.239.91.187` / `100.96.230.80`)
-- **Git Commit Head SHA**: `f9b4f135b91b9759c9ba2f9c9ccba95bc997fa08`
+- **Git Commit Head SHA**: `2d7084e1062e5052b2c96b991d1b64b4c3830870`
 - **Rebuild Status**: `SUCCESS`
 - **Health check response**: `{"status":"ok","trading_mode":"paper","live_enabled":false,"live_armed":false}`
 
