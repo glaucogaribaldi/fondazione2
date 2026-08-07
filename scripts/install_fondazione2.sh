@@ -6,11 +6,11 @@ readonly CONFIRMATION="ERASE_OLD_FOUNDATION_AND_INSTALL_FONDAZIONE2_WITHOUT_BACK
 APP_DIR="/opt/fondazione2"
 CONFIRM=""
 REPOSITORY_URL="https://github.com/glaucogaribaldi/fondazione2.git"
-REPOSITORY_REF="940b6b2c351d8988190a4755ff6c92f369d048c0"
+REPOSITORY_REF=""
 
 usage() {
   cat <<'EOF'
-Usage: sudo ./scripts/install_fondazione2.sh --confirm ERASE_OLD_FOUNDATION_AND_INSTALL_FONDAZIONE2_WITHOUT_BACKUP [--ref REBUILD_COMMIT_HASH]
+Usage: sudo ./scripts/install_fondazione2.sh --confirm ERASE_OLD_FOUNDATION_AND_INSTALL_FONDAZIONE2_WITHOUT_BACKUP --ref REBUILD_COMMIT_HASH
 
 Executes a complete clean wipe of the legacy fondazionesemplice stack on the verified GCP VPS,
 sets up the Fondazione2 production directory (/opt/fondazione2), configures secure keys,
@@ -36,6 +36,13 @@ fi
 # Verify operator confirmation
 if [[ "$CONFIRM" != "$CONFIRMATION" ]]; then
   echo "Error: Destructive confirmation missing. Expected: --confirm $CONFIRMATION" >&2
+  exit 2
+fi
+
+# Verify mandatory ref argument (Blocker F)
+if [[ -z "$REPOSITORY_REF" ]]; then
+  echo "Error: Immutable --ref <commit-hash> argument is mandatory." >&2
+  usage
   exit 2
 fi
 
@@ -90,6 +97,7 @@ sed -i \
   -e "s|KRONOS_BACKEND=.*|KRONOS_BACKEND=real|" \
   -e "s|TRADING_MODE=.*|TRADING_MODE=paper|" \
   -e "s|LIVE_ENABLED=.*|LIVE_ENABLED=false|" \
+  -e "s|LIVE_ARMED=.*|LIVE_ARMED=false|" \
   .env
 
 chmod 600 .env
@@ -98,7 +106,7 @@ echo "Secure secrets generated in $APP_DIR/.env (permissions 600)."
 # 6. Verify NVIDIA drivers & toolkit
 echo "=== [6/9] Verifying NVIDIA GPU Environment ==="
 if ! command -v nvidia-smi >/dev/null 2>&1; then
-  echo "Warning: nvidia-smi not found! Attempting to reload drivers or continuing in simulation mode..." >&2
+  echo "Warning: nvidia-smi not found! Continuing in simulation/CPU mode..." >&2
 else
   nvidia-smi
 fi
@@ -134,16 +142,24 @@ docker compose ps
 echo "Checking decision-service healthz..."
 curl -fsS http://localhost:8080/healthz || { echo "Error: Decision-service failed health check!" >&2; exit 4; }
 
-# 9. Verify Safety State
+# 9. Verify Safety State (Unified check)
 echo "=== [9/9] Verification Checklist ==="
 mode_check=$(docker compose exec -T decision-service python -c "import urllib.request, json; print(json.loads(urllib.request.urlopen('http://localhost:8080/healthz').read().decode())['trading_mode'])")
 live_check=$(docker compose exec -T decision-service python -c "import urllib.request, json; print(json.loads(urllib.request.urlopen('http://localhost:8080/healthz').read().decode())['live_enabled'])")
+armed_check=$(docker compose exec -T decision-service python -c "import urllib.request, json; print(json.loads(urllib.request.urlopen('http://localhost:8080/healthz').read().decode())['live_armed'])")
 
 echo "CONFIRMED: TRADING_MODE=$mode_check"
 echo "CONFIRMED: LIVE_ENABLED=$live_check"
+echo "CONFIRMED: LIVE_ARMED=$armed_check"
 
-if [[ "$mode_check" != "paper" || "$live_check" != "False" ]]; then
-  echo "CRITICAL SAFETY FAIL: Live trading is enabled or mode is not paper! Shutting down immediately..." >&2
+# Private credentials absence check
+if grep -q "COINBASE_API_KEY" .env 2>/dev/null && [ "$(grep "COINBASE_API_KEY" .env | cut -d'=' -f2)" != "" ]; then
+  echo "Error: Private credentials found in .env!" >&2
+  exit 6
+fi
+
+if [[ "$mode_check" != "paper" || "$live_check" != "False" || "$armed_check" != "False" ]]; then
+  echo "CRITICAL SAFETY FAIL: Live trading is enabled or disarmed check failed! Shutting down immediately..." >&2
   docker compose down
   exit 5
 fi

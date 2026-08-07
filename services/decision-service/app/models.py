@@ -1,10 +1,8 @@
 from datetime import datetime
-from typing import Literal
-
+from typing import Literal, Any
 from pydantic import BaseModel, Field, model_validator
 
-
-Action = Literal["BUY", "SELL", "HOLD", "NO_TRADE", "OPEN", "ADD", "REDUCE", "CLOSE"]
+Action = Literal["NO_TRADE", "OPEN", "ADD", "REDUCE", "CLOSE"]
 
 
 class Candle(BaseModel):
@@ -86,3 +84,46 @@ class DecisionResponse(BaseModel):
     approved_by_risk_engine: bool
     reason_codes: list[str]
     model_versions: dict[str, str]
+
+
+class RiskDecision(BaseModel):
+    risk_decision_id: str
+    candidate_id: str
+    result: Literal["APPROVE", "MODIFY_DOWN", "REJECT", "PROTECTIVE_EXIT"]
+    approved_action: Action
+    approved_quantity: float = 0.0
+    limits_snapshot: dict[str, Any] = Field(default_factory=dict)
+    reason_codes: list[str] = Field(default_factory=list)
+    expires_at: datetime
+
+
+class ExecutionIntent(BaseModel):
+    execution_intent_id: str
+    risk_decision_id: str
+    mode: Literal["paper", "live"]
+    symbol: str
+    action: Literal["OPEN", "ADD", "REDUCE", "CLOSE"]
+    side: Literal["BUY", "SELL"]
+    quantity: float
+    order_type: Literal["MARKET", "LIMIT", "STOP", "STOP_LIMIT"] = "MARKET"
+    limit_price: float | None = None
+    stop_price: float | None = None
+    take_profit_price: float | None = None
+    time_exit_at: datetime | None = None
+    client_order_id: str
+    created_at: datetime
+    expires_at: datetime
+
+
+class ExecutionResult(BaseModel):
+    execution_intent_id: str
+    broker_order_id: str
+    status: Literal["PENDING", "PARTIAL", "FILLED", "CANCELLED", "REJECTED", "FAILED"]
+    requested_quantity: float
+    filled_quantity: float
+    average_fill_price: float | None = None
+    fee: float = 0.0
+    slippage: float = 0.0
+    fills: list[dict[str, Any]] = Field(default_factory=list)
+    updated_at: datetime
+    reason_codes: list[str] = Field(default_factory=list)

@@ -84,7 +84,7 @@ class RiskTests(unittest.TestCase):
     def test_stale_market_fails_closed(self):
         result = evaluate_risk(request(age_seconds=180), BUY, GLOBAL, LANE, now=NOW)
         self.assertFalse(result.approved)
-        self.assertEqual(result.action, "HOLD")
+        self.assertEqual(result.action, "NO_TRADE")
         self.assertIn("STALE_MARKET_DATA", result.reasons)
 
     def test_allocation_limit_fails_closed(self):

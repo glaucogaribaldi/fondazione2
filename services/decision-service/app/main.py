@@ -29,6 +29,7 @@ async def healthz() -> dict:
         "status": "ok",
         "trading_mode": os.getenv("TRADING_MODE", "paper"),
         "live_enabled": os.getenv("LIVE_ENABLED", "false").lower() == "true",
+        "live_armed": os.getenv("LIVE_ARMED", "false").lower() == "true",
     }
 
 
@@ -63,14 +64,14 @@ async def decide(request: DecisionRequest) -> DecisionResponse:
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"unknown lane: {request.lane_id}") from exc
     except Exception as exc:
-        DECISIONS.labels(request.lane_id, "HOLD", "false").inc()
+        DECISIONS.labels(request.lane_id, "NO_TRADE", "false").inc()
         REASONS.labels(request.lane_id, "FAIL_CLOSED").inc()
         REASONS.labels(request.lane_id, type(exc).__name__.upper()).inc()
         return DecisionResponse(
             request_id=request.request_id,
             lane_id=request.lane_id,
             symbol=request.symbol,
-            decision="HOLD",
+            decision="NO_TRADE",
             allocation_pct=0,
             confidence=0,
             stop_loss_pct=None,

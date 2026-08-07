@@ -77,11 +77,11 @@ def evaluate_risk(
         reasons.append("SPREAD_TOO_WIDE")
 
     # 4. Confidence check (Only for new exposure entries)
-    if proposal.action in ("BUY", "OPEN", "ADD") and proposal.confidence < lane_settings.minimum_confidence:
+    if proposal.action in ("OPEN", "ADD") and proposal.confidence < lane_settings.minimum_confidence:
         reasons.append("CONFIDENCE_TOO_LOW")
 
     # 5. Position Sizing Semantics (HST-04) and limits (Only for entries)
-    if proposal.action in ("BUY", "OPEN", "ADD"):
+    if proposal.action in ("OPEN", "ADD"):
         if proposal.allocation_pct > min(
             global_settings.max_allocation_pct, lane_settings.max_position_pct
         ):
@@ -94,12 +94,12 @@ def evaluate_risk(
     # 7. Position counts
     if (
         request.portfolio.open_positions >= lane_settings.max_open_positions
-        and proposal.action in ("BUY", "OPEN")
+        and proposal.action == "OPEN"
     ):
         reasons.append("OPEN_POSITION_LIMIT")
 
-    # 8. Cooldown - strictly applied only to ENTRIES/BUYS, never EXITS/REDUCES (HST-03)
-    if proposal.action in ("BUY", "OPEN", "ADD") and request.portfolio.last_trade_at:
+    # 8. Cooldown - strictly applied only to ENTRIES/OPEN/ADD, never EXITS/REDUCES/CLOSE (HST-03)
+    if proposal.action in ("OPEN", "ADD") and request.portfolio.last_trade_at:
         last_trade = request.portfolio.last_trade_at
         if last_trade.tzinfo is None:
             last_trade = last_trade.replace(tzinfo=UTC)
@@ -107,7 +107,7 @@ def evaluate_risk(
             reasons.append("COOLDOWN_ACTIVE")
 
     # 9. Protective SL/TP validation
-    if proposal.action in ("BUY", "OPEN") and global_settings.require_stop_loss_for_buy:
+    if proposal.action == "OPEN" and global_settings.require_stop_loss_for_buy:
         if proposal.stop_loss_pct is None:
             reasons.append("STOP_LOSS_REQUIRED")
         elif not (
@@ -126,22 +126,22 @@ def evaluate_risk(
     ):
         reasons.append("LIVE_TRADING_LOCKED")
 
-    # HOLD actions preserve model reason codes
-    if proposal.action == "HOLD":
+    # NO_TRADE actions preserve model reason codes
+    if proposal.action == "NO_TRADE":
         reasons.extend(code for code in proposal.reason_codes if code not in reasons)
         return RiskResult(
             approved=True,
-            action="HOLD",
+            action="NO_TRADE",
             allocation_pct=0,
-            reasons=tuple(reasons or ["MODEL_HOLD"]),
+            reasons=tuple(reasons or ["MODEL_NO_TRADE"]),
             valid_until=current_time + timedelta(seconds=60),
         )
 
-    # If any safety check fails, force HOLD (fail-closed)
+    # If any safety check fails, force NO_TRADE (fail-closed)
     if reasons:
         return RiskResult(
             approved=False,
-            action="HOLD",
+            action="NO_TRADE",
             allocation_pct=0,
             reasons=tuple(reasons),
             valid_until=current_time + timedelta(seconds=30),

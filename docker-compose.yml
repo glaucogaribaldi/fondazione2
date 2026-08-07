@@ -136,15 +136,6 @@ services:
       retries: 20
       start_period: 300s
 
-  # 7. Nemotron Mock Server (CPU Profile)
-  nemotron-mock:
-    <<: *common
-    profiles: [mock]
-    build:
-      context: ./services/nemotron-mock
-    ports:
-      - "127.0.0.1:30000:30000"
-
   # 8. QuantDinger API
   quantdinger-api:
     <<: *common

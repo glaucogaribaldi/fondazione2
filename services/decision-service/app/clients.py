@@ -23,10 +23,10 @@ async def get_forecast(request: DecisionRequest) -> Forecast:
 
 def quant_proposal(forecast: Forecast) -> Proposal:
     if forecast.confidence < 0.65 or abs(forecast.expected_return_pct) < 0.10:
-        return Proposal(action="HOLD", allocation_pct=0, confidence=forecast.confidence)
+        return Proposal(action="NO_TRADE", allocation_pct=0, confidence=forecast.confidence)
     if forecast.direction == "up":
         return Proposal(
-            action="BUY",
+            action="OPEN",
             allocation_pct=8,
             confidence=forecast.confidence,
             stop_loss_pct=1.0,
@@ -35,12 +35,12 @@ def quant_proposal(forecast: Forecast) -> Proposal:
         )
     if forecast.direction == "down":
         return Proposal(
-            action="SELL",
-            allocation_pct=8,
+            action="CLOSE",
+            allocation_pct=100,
             confidence=forecast.confidence,
             reason_codes=["KRONOS_DOWN"],
         )
-    return Proposal(action="HOLD", allocation_pct=0, confidence=forecast.confidence)
+    return Proposal(action="NO_TRADE", allocation_pct=0, confidence=forecast.confidence)
 
 
 async def get_ai_proposal(request: DecisionRequest, forecast: Forecast) -> Proposal:
@@ -49,7 +49,7 @@ async def get_ai_proposal(request: DecisionRequest, forecast: Forecast) -> Propo
 
     system_prompt = (
         "You are a constrained trading proposal engine. Return JSON only. "
-        "Allowed actions: BUY, SELL, HOLD. Never override risk limits."
+        "Allowed actions: NO_TRADE, OPEN, ADD, REDUCE, CLOSE. Never override risk limits."
     )
     user_payload = {
         "symbol": request.symbol,
@@ -57,8 +57,8 @@ async def get_ai_proposal(request: DecisionRequest, forecast: Forecast) -> Propo
         "forecast": forecast.model_dump(mode="json"),
         "portfolio": request.portfolio.model_dump(mode="json"),
         "required_schema": {
-            "action": "BUY|SELL|HOLD",
-            "allocation_pct": "number 0..20",
+            "action": "NO_TRADE|OPEN|ADD|REDUCE|CLOSE",
+            "allocation_pct": "number 0..100",
             "confidence": "number 0..1",
             "stop_loss_pct": "number|null",
             "take_profit_pct": "number|null",
