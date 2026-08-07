@@ -6,7 +6,7 @@ readonly CONFIRMATION="ERASE_OLD_FOUNDATION_AND_INSTALL_FONDAZIONE2_WITHOUT_BACK
 APP_DIR="/opt/fondazione2"
 CONFIRM=""
 REPOSITORY_URL="https://github.com/glaucogaribaldi/fondazione2.git"
-REPOSITORY_REF="openclaw/task-0002-clean-rebuild"
+REPOSITORY_REF="3b406536c2a03dc19615b95ff10168c8b829b10a"
 
 usage() {
   cat <<'EOF'
