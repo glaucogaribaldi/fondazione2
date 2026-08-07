@@ -4,7 +4,7 @@ import hashlib
 import json
 import time
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from prometheus_client import Counter, Gauge, make_asgi_app
