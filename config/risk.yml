@@ -1,0 +1,13 @@
+version: 1
+global:
+  allowed_symbols: [BTC/USDC, ETH/USDC, BTC/USDT, ETH/USDT]
+  allowed_actions: [NO_TRADE, OPEN, ADD, REDUCE, CLOSE]
+  max_allocation_pct: 20
+  max_spread_bps: 35
+  max_market_age_seconds: 90
+  max_decision_ttl_seconds: 300
+  require_stop_loss_for_buy: true
+  min_stop_loss_pct: 0.25
+  max_stop_loss_pct: 3.0
+  max_take_profit_pct: 8.0
+  fail_closed: true

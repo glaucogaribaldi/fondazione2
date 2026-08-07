@@ -1,0 +1,10 @@
+version: 2
+lanes:
+  lane_1:
+    name: fondazione2_baseline_lane
+    ai_enabled: true
+    minimum_confidence: 0.70
+    max_position_pct: 10
+    max_daily_loss_pct: 2
+    max_open_positions: 2
+    cooldown_minutes: 30
