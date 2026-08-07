@@ -148,7 +148,7 @@ services:
   # 8. QuantDinger API
   quantdinger-api:
     <<: *common
-    image: ghcr.io/OpenByteInc/quantdinger-backend:v5.0.15
+    image: ghcr.io/openbyteinc/quantdinger-backend:v5.0.15
     command: gunicorn -c gunicorn_config.py run:app
     environment:
       DATABASE_URL: postgresql://fondazione:fondazionepassword@postgres:5432/fondazione
@@ -170,7 +170,7 @@ services:
   # 9. QuantDinger Trading Worker
   quantdinger-worker:
     <<: *common
-    image: ghcr.io/OpenByteInc/quantdinger-backend:v5.0.15
+    image: ghcr.io/openbyteinc/quantdinger-backend:v5.0.15
     command: python -m app.commands.trading_worker
     environment:
       DATABASE_URL: postgresql://fondazione:fondazionepassword@postgres:5432/fondazione
@@ -186,7 +186,7 @@ services:
   # 10. QuantDinger Scheduler
   quantdinger-scheduler:
     <<: *common
-    image: ghcr.io/OpenByteInc/quantdinger-backend:v5.0.15
+    image: ghcr.io/openbyteinc/quantdinger-backend:v5.0.15
     command: python -m app.commands.scheduler
     environment:
       DATABASE_URL: postgresql://fondazione:fondazionepassword@postgres:5432/fondazione
@@ -199,7 +199,7 @@ services:
   # 11. QuantDinger Celery Worker (Asynchronous backtests & AI)
   quantdinger-celery:
     <<: *common
-    image: ghcr.io/OpenByteInc/quantdinger-backend:v5.0.15
+    image: ghcr.io/openbyteinc/quantdinger-backend:v5.0.15
     command: celery -A app.celery_app:celery_app worker --loglevel=info
     environment:
       DATABASE_URL: postgresql://fondazione:fondazionepassword@postgres:5432/fondazione
@@ -212,7 +212,7 @@ services:
   # 12. QuantDinger Celery Beat (Schedules and periodic tasks)
   quantdinger-celery-beat:
     <<: *common
-    image: ghcr.io/OpenByteInc/quantdinger-backend:v5.0.15
+    image: ghcr.io/openbyteinc/quantdinger-backend:v5.0.15
     command: celery -A app.celery_app:celery_app beat --loglevel=info
     environment:
       DATABASE_URL: postgresql://fondazione:fondazionepassword@postgres:5432/fondazione
