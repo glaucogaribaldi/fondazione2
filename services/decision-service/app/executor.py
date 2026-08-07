@@ -27,6 +27,21 @@ class DatabaseConnection:
     def _init_sqlite_schema(self):
         cursor = self.sqlite_conn.cursor()
         cursor.execute("""
+        CREATE TABLE IF NOT EXISTS decision_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id TEXT NOT NULL,
+            lane_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            proposed_action TEXT NOT NULL,
+            final_action TEXT NOT NULL,
+            approved INTEGER NOT NULL,
+            reason_codes TEXT NOT NULL DEFAULT '[]',
+            model_versions TEXT NOT NULL DEFAULT '{}',
+            payload_hash TEXT NOT NULL,
+            payload TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+        cursor.execute("""
         CREATE TABLE IF NOT EXISTS paper_balances (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             lane_id TEXT NOT NULL UNIQUE,

@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS decision_audit (
     reason_codes JSONB NOT NULL DEFAULT '[]'::jsonb,
     model_versions JSONB NOT NULL DEFAULT '{}'::jsonb,
     payload_hash TEXT NOT NULL,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
