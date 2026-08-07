@@ -1,7 +1,7 @@
 # TASK-0002 - Deployment Report (Revised)
 
-**Date:** Fri Aug 7 16:49:00 CEST 2026 / 14:49:00 UTC 2026
-**Commit:** `openclaw/task-0002-clean-rebuild`
+**Date:** Fri Aug 7 17:50:00 CEST 2026 / 15:50:00 UTC 2026
+**Commit:** `f9b4f135b91b9759c9ba2f9c9ccba95bc997fa08`
 **Component Status:** DEPLOYED & STABLE
 
 ---
@@ -9,7 +9,7 @@
 ## 1. Deployed Commit Reference
 
 The target VPS `/opt/fondazione2` is successfully installed and running on the immutable git commit of the `openclaw/task-0002-clean-rebuild` branch:
-*   **Active Deployed Commit:** `d29c923ea0be`
+*   **Active Deployed Commit:** `f9b4f135b91b9759c9ba2f9c9ccba95bc997fa08`
 *   **Target Directory:** `/opt/fondazione2`
 
 ---
@@ -20,20 +20,20 @@ We redeployed the corrected, secure, and fully lowercase Docker Compose services
 
 | Service Name | Container Name | Image / Origin | Status |
 |---|---|---|---|
-| **postgres** | `fondazionesemplice-postgres-1` | `postgres:16-alpine` | `Up (healthy)` |
-| **redis-cache** | `fondazionesemplice-redis-cache-1` | `redis:7-alpine` | `Up (healthy)` |
-| **redis-jobs** | `fondazionesemplice-redis-jobs-1` | `redis:7-alpine` | `Up (healthy)` |
-| **decision-service** | `fondazionesemplice-decision-service-1` | Local build (FastAPI) | `Up (healthy)` |
-| **kronos** | `fondazionesemplice-kronos-1` | Local build (NeoQuasar/Kronos-base) | `Up (healthy)` |
-| **nemotron** | `fondazionesemplice-nemotron-1` | `lmsysorg/sglang:v0.5.15.post1` | `Up (healthy)` |
-| **quantdinger-api** | `fondazionesemplice-quantdinger-api-1` | `ghcr.io/openbyteinc/quantdinger-backend:v5.0.15` | `Up` |
-| **quantdinger-worker** | `fondazionesemplice-quantdinger-worker-1` | `ghcr.io/openbyteinc/quantdinger-backend:v5.0.15` | `Up` |
-| **quantdinger-scheduler** | `fondazionesemplice-quantdinger-scheduler-1` | `ghcr.io/openbyteinc/quantdinger-backend:v5.0.15` | `Up` |
-| **quantdinger-celery** | `fondazionesemplice-quantdinger-celery-1` | `ghcr.io/openbyteinc/quantdinger-backend:v5.0.15` | `Up` |
-| **quantdinger-celery-beat** | `fondazionesemplice-quantdinger-celery-beat-1` | `ghcr.io/openbyteinc/quantdinger-backend:v5.0.15` | `Up` |
-| **prometheus** | `fondazionesemplice-prometheus-1` | `prom/prometheus:v2.54.1` | `Up` |
-| **grafana** | `fondazionesemplice-grafana-1` | `grafana/grafana:11.2.2` | `Up` |
-| **gateway** | `fondazionesemplice-gateway-1` | `caddy:2.10.2-alpine` | `Up` |
+| **postgres** | `fondazione2-postgres-1` | `postgres:16-alpine` | `Up (healthy)` |
+| **redis-cache** | `fondazione2-redis-cache-1` | `redis:7-alpine` | `Up (healthy)` |
+| **redis-jobs** | `fondazione2-redis-jobs-1` | `redis:7-alpine` | `Up (healthy)` |
+| **decision-service** | `fondazione2-decision-service-1` | Local build (FastAPI) | `Up (healthy)` |
+| **kronos** | `fondazione2-kronos-1` | Local build (NeoQuasar/Kronos-base) | `Up (healthy)` |
+| **nemotron** | `fondazione2-nemotron-1` | `lmsysorg/sglang:v0.5.15.post1` | `Up (healthy)` |
+| **quantdinger-api** | `fondazione2-quantdinger-api-1` | `ghcr.io/openbyteinc/quantdinger-backend:v5.0.15` | `Up` |
+| **quantdinger-worker** | `fondazione2-quantdinger-worker-1` | `ghcr.io/openbyteinc/quantdinger-backend:v5.0.15` | `Up` |
+| **quantdinger-scheduler** | `fondazione2-quantdinger-scheduler-1` | `ghcr.io/openbyteinc/quantdinger-backend:v5.0.15` | `Up` |
+| **quantdinger-celery** | `fondazione2-quantdinger-celery-1` | `ghcr.io/openbyteinc/quantdinger-backend:v5.0.15` | `Up` |
+| **quantdinger-celery-beat** | `fondazione2-quantdinger-celery-beat-1` | `ghcr.io/openbyteinc/quantdinger-backend:v5.0.15` | `Up` |
+| **prometheus** | `fondazione2-prometheus-1` | `prom/prometheus:v2.54.1` | `Up` |
+| **grafana** | `fondazione2-grafana-1` | `grafana/grafana:11.2.2` | `Up` |
+| **gateway** | `fondazione2-gateway-1` | `caddy:2.10.2-alpine` | `Up` |
 
 ---
 
@@ -58,7 +58,7 @@ INFRA_REBUILD_OK=true
 ```text
 ENGINE_BASELINE_VALIDATED=true
 ```
-*(Confirms that the Decision and Risk contracts conform end-to-end to the specifications on main, and the 24 tests covering HST-01 to HST-12 pass perfectly).*
+*(Confirms that the Decision and Risk contracts conform end-to-end to the specifications on main, and the 19 integration tests covering HST-01 to HST-12 pass perfectly).*
 
 ---
 
@@ -69,5 +69,6 @@ PAPER_BASELINE_STATUS=READY_FOR_ENGINE_VALIDATION
 ```
 *   `TRADING_MODE=paper` (Verified)
 *   `LIVE_ARMED=false` (Verified)
+*   `LIVE_ENABLED=false` (Verified)
 *   `COINBASE_PRIVATE_CREDENTIALS_PRESENT=false` (Verified)
 *   `REAL_ORDERS_SENT=0` (Verified)
