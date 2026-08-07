@@ -157,9 +157,21 @@ class HistoricalFailuresTests(unittest.TestCase):
         No silent skips. Environment must supply TEST_POSTGRES_URL.
         Asserts exactly one successful OPEN and one specific rejection or serialization failure.
         """
-        pg_url = os.getenv("TEST_POSTGRES_URL") or os.getenv("DATABASE_URL")
+        pg_url = os.getenv("TEST_POSTGRES_URL")
         if not pg_url:
-            self.fail("TEST_POSTGRES_URL or DATABASE_URL environment variable is mandatory and must be set for PostgreSQL concurrency certification.")
+            self.fail("TEST_POSTGRES_URL environment variable is mandatory and must be set for PostgreSQL concurrency certification.")
+
+        # Blocker I1: Strict Safety checks to prevent destructive testing on canonical database
+        db_url = os.getenv("DATABASE_URL")
+        if db_url:
+            if pg_url.strip().lower() == db_url.strip().lower():
+                self.fail("CRITICAL SAFETY BLOCK: TEST_POSTGRES_URL cannot be equal to DATABASE_URL!")
+
+        from urllib.parse import urlparse
+        parsed = urlparse(pg_url)
+        dbname = parsed.path.lstrip("/")
+        if "test" not in dbname.lower():
+            self.fail(f"CRITICAL SAFETY BLOCK: TEST_POSTGRES_URL must target a database containing 'test' (got dbname: '{dbname}')")
 
         # Recreate test schema on real test PostgreSQL
         try:
