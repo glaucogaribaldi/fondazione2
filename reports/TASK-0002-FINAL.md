@@ -33,7 +33,7 @@ There are no private Coinbase credentials present in the environment or codebase
 
 ## Deployment Metadata
 - **Target Host**: GCP VPS `fondazione` (`35.239.91.187` / `100.96.230.80`)
-- **Git Commit Head SHA**: `2d7084e1062e5052b2c96b991d1b64b4c3830870`
+- **Git Commit Head SHA**: `27efcae85be5691079d854495c6ca80481b37df2`
 - **Rebuild Status**: `SUCCESS`
 - **Health check response**: `{"status":"ok","trading_mode":"paper","live_enabled":false,"live_armed":false}`
 
