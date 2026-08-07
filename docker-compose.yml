@@ -53,6 +53,7 @@ services:
     environment:
       TRADING_MODE: ${TRADING_MODE:?trading mode required}
       LIVE_ENABLED: ${LIVE_ENABLED:?live enabled required}
+      LIVE_ARMED: ${LIVE_ARMED:?live armed required}
       LIVE_CONFIRMATION: ${LIVE_CONFIRMATION:-}
       DECISION_API_KEY: ${DECISION_API_KEY:?decision api key required}
       AI_BACKEND: ${AI_BACKEND:?ai backend required}

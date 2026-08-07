@@ -79,3 +79,10 @@ CREATE TABLE IF NOT EXISTS execution_results (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     reason_codes JSONB NOT NULL DEFAULT '[]'::jsonb
 );
+
+CREATE TABLE IF NOT EXISTS market_marks (
+    id BIGSERIAL PRIMARY KEY,
+    symbol TEXT NOT NULL UNIQUE,
+    price NUMERIC(20, 8) NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
