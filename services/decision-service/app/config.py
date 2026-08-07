@@ -41,17 +41,3 @@ def load_lane_settings(lane_id: str) -> tuple[dict, LaneSettings]:
         max_open_positions=int(lane["max_open_positions"]),
         cooldown_minutes=int(lane["cooldown_minutes"]),
     )
-
-
-def load_bootstrap_probe() -> dict:
-    probe = _load_yaml("release.yml").get("bootstrap_probe", {})
-    return {
-        "enabled": bool(probe.get("enabled", False)),
-        "symbol": str(probe.get("symbol", "BTC/USDT")),
-        "request_id_prefix": str(
-            probe.get("request_id_prefix", "coinbase-BTC-USDT-")
-        ),
-        "allocation_pct": float(probe.get("allocation_pct", 1.0)),
-        "stop_loss_pct": float(probe.get("stop_loss_pct", 1.0)),
-        "take_profit_pct": float(probe.get("take_profit_pct", 1.8)),
-    }

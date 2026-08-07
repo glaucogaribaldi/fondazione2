@@ -5,9 +5,8 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException
 from prometheus_client import Counter, make_asgi_app
 
-from .bootstrap import bootstrap_probe_proposal, should_run_bootstrap_probe
 from .clients import get_ai_proposal, get_forecast, quant_proposal
-from .config import load_bootstrap_probe, load_lane_settings, load_risk_settings
+from .config import load_lane_settings, load_risk_settings
 from .models import DecisionRequest, DecisionResponse
 from .risk import evaluate_risk
 
@@ -39,24 +38,19 @@ async def decide(request: DecisionRequest) -> DecisionResponse:
         raise HTTPException(status_code=409, detail="request mode differs from server mode")
     try:
         lane, lane_settings = load_lane_settings(request.lane_id)
-        bootstrap_probe = load_bootstrap_probe()
-        if should_run_bootstrap_probe(request, bootstrap_probe):
-            proposal = bootstrap_probe_proposal(bootstrap_probe)
-            model_versions = {
-                "forecast": "not-used",
-                "decision": "deterministic-bootstrap-probe",
-            }
-        else:
-            forecast = await get_forecast(request)
-            proposal = (
-                await get_ai_proposal(request, forecast)
-                if lane["ai_enabled"]
-                else quant_proposal(forecast)
-            )
-            model_versions = {
-                "forecast": forecast.model,
-                "decision": os.getenv("NEMOTRON_MODEL", "deterministic-quant"),
-            }
+        
+        # Standard Fondazione2 Decision Flow: get forecast -> get proposal
+        forecast = await get_forecast(request)
+        proposal = (
+            await get_ai_proposal(request, forecast)
+            if lane["ai_enabled"]
+            else quant_proposal(forecast)
+        )
+        model_versions = {
+            "forecast": forecast.model,
+            "decision": os.getenv("NEMOTRON_MODEL", "deterministic-quant"),
+        }
+        
         result = evaluate_risk(
             request,
             proposal,
