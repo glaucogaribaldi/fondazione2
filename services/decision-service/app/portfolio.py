@@ -597,6 +597,41 @@ class PortfolioEngine:
             rate = get_conversion_rate_to_usdc(quote, get_mark_func)
             price = get_mark_func(proposal.symbol)
 
+            if rate is None or rate <= 0.0:
+                reason_codes.append("STALE_CONVERSION_PATH")
+                new_v = self._increment_version_tx(cur)
+                self._persist_allocation_audit_tx(
+                    cur,
+                    allocation_id=allocation_id,
+                    proposal_id=proposal.proposal_id,
+                    symbol=proposal.symbol,
+                    action=proposal.action,
+                    req_risk=proposal.requested_risk_fraction,
+                    app_risk=0.0,
+                    req_notional=proposal.requested_notional,
+                    app_notional=0.0,
+                    reserved=0.0,
+                    status="REJECTED",
+                    reason_codes=reason_codes,
+                    port_version=new_v,
+                    port_digest=snapshot.digest,
+                    marks_provenance={},
+                    config_hash=config_hash,
+                    code_sha=code_sha
+                )
+                return AllocationResult(
+                    allocation_id=allocation_id,
+                    proposal_id=proposal.proposal_id,
+                    symbol=proposal.symbol,
+                    decision="REJECT",
+                    approved_notional=0.0,
+                    approved_quantity=0.0,
+                    reserved_capital=0.0,
+                    reason_codes=reason_codes,
+                    portfolio_version=new_v,
+                    portfolio_digest=snapshot.digest
+                )
+
             # Drawdown check
             if snapshot.drawdown > 10.0:
                 reason_codes.append("RISK_BUDGET_EXCEEDED")

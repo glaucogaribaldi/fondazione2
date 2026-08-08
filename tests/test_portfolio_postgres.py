@@ -396,12 +396,15 @@ class TestPortfolioPostgres(unittest.TestCase):
         """
         self.portfolio.initialize_portfolio(10000.0)
         
+        prop_id_1 = str(uuid.uuid4())
+        prop_id_2 = str(uuid.uuid4())
+        
         # Save a PENDING allocation with ID 'alloc-xyz-1'
         with self.portfolio._get_db_cursor_context() as cur:
             self.portfolio._persist_allocation_audit_tx(
                 cur,
                 allocation_id="alloc-xyz-1",
-                proposal_id="prop-xyz-1",
+                proposal_id=prop_id_1,
                 symbol="BTC/USDC",
                 action="OPEN",
                 req_risk=0.10,
@@ -424,7 +427,7 @@ class TestPortfolioPostgres(unittest.TestCase):
             self.portfolio._persist_allocation_audit_tx(
                 cur,
                 allocation_id="alloc-xyz-2",
-                proposal_id="prop-xyz-2",
+                proposal_id=prop_id_2,
                 symbol="BTC/USDC",
                 action="OPEN",
                 req_risk=0.10,
@@ -447,7 +450,7 @@ class TestPortfolioPostgres(unittest.TestCase):
             cur.execute("""
                 INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, client_order_id, expires_at, allocation_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (str(uuid.uuid4()), "prop-xyz-2", "paper", "BTC/USDC", "OPEN", "BUY", 0.1, "MARKET", "client-ord-xyz", (datetime.now(UTC) + timedelta(minutes=5)).isoformat(), "alloc-xyz-2"))
+            """, (str(uuid.uuid4()), prop_id_2, "paper", "BTC/USDC", "OPEN", "BUY", 0.1, "MARKET", "client-ord-xyz", (datetime.now(UTC) + timedelta(minutes=5)).isoformat(), "alloc-xyz-2"))
 
         # Reconcile orphan reservations
         self.portfolio.reconcile_orphan_reservations()
