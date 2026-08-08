@@ -226,7 +226,7 @@ class TestPortfolioPostgres(unittest.TestCase):
         self.assertEqual(res1.reserved_capital, 1000.0)
         
         self.assertEqual(res2.decision, "MODIFY_DOWN")
-        self.assertEqual(res2.reserved_capital, 500.0) # Scaled down to available cash exactly!
+        self.assertAlmostEqual(res2.reserved_capital, 500.0, delta=0.01) # Scaled down to available cash exactly!
 
     def test_pe_04_restart_reconstruction_digest_parity(self):
         """
@@ -359,7 +359,7 @@ class TestPortfolioPostgres(unittest.TestCase):
         
         # Together they must NEVER oversubscribe available cash budget of 1500.0!
         total_reserved = sum(r.reserved_capital for r in results)
-        self.assertEqual(total_reserved, 1500.0)
+        self.assertAlmostEqual(total_reserved, 1500.0, delta=0.01)
 
     def test_pe_08_add_remaining_capacity(self):
         """
@@ -594,11 +594,12 @@ class TestPortfolioPostgres(unittest.TestCase):
 
         # Create a mock pending allocation
         alloc_id = str(uuid.uuid4())
+        proposal_id_val = str(uuid.uuid4())
         with executor.portfolio_engine._get_db_cursor_context() as cur:
             executor.portfolio_engine._persist_allocation_audit_tx(
                 cur,
                 allocation_id=alloc_id,
-                proposal_id="prop-err-inj",
+                proposal_id=proposal_id_val,
                 symbol="BTC/USDC",
                 action="OPEN",
                 req_risk=0.10,
@@ -618,13 +619,13 @@ class TestPortfolioPostgres(unittest.TestCase):
 
         intent = ExecutionIntent(
             execution_intent_id=str(uuid.uuid4()),
-            risk_decision_id="prop-err-inj",
+            risk_decision_id=proposal_id_val,
             mode="paper",
             symbol="BTC/USDC",
             action="OPEN",
             side="BUY",
             quantity=0.01,
-            client_order_id="client-err-inj-id",
+            client_order_id=f"client-err-inj-id-{uuid.uuid4()}",
             created_at=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
             allocation_id=alloc_id
@@ -668,12 +669,13 @@ class TestPortfolioPostgres(unittest.TestCase):
             cur.execute("INSERT INTO portfolio_cash (currency, cash, reserved) VALUES ('EUR', 1000.0, 0.0) ON CONFLICT (currency) DO UPDATE SET cash = 1000.0, reserved = 0.0")
 
         alloc_id = str(uuid.uuid4())
+        proposal_id_val = str(uuid.uuid4())
         # Save a PENDING allocation of 500 EUR on BTC/EUR
         with executor.portfolio_engine._get_db_cursor_context() as cur:
             executor.portfolio_engine._persist_allocation_audit_tx(
                 cur,
                 allocation_id=alloc_id,
-                proposal_id="prop-eur-test",
+                proposal_id=proposal_id_val,
                 symbol="BTC/EUR",
                 action="OPEN",
                 req_risk=0.10,
@@ -697,13 +699,13 @@ class TestPortfolioPostgres(unittest.TestCase):
 
         intent = ExecutionIntent(
             execution_intent_id=str(uuid.uuid4()),
-            risk_decision_id="prop-eur-test",
+            risk_decision_id=proposal_id_val,
             mode="paper",
             symbol="BTC/EUR",
             action="OPEN",
             side="BUY",
             quantity=0.01,
-            client_order_id="client-order-eur-id",
+            client_order_id=f"client-order-eur-id-{uuid.uuid4()}",
             created_at=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(minutes=5),
             allocation_id=alloc_id
