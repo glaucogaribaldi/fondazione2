@@ -274,8 +274,8 @@ class PaperLoopTests(unittest.TestCase):
         
         # Now let's fetch the snapshots again
         snapshots_after = cursor.execute("SELECT equity, cash, realized_pnl, unrealized_pnl, fees, max_drawdown_pct FROM arena_snapshots WHERE lane_id = ? ORDER BY id ASC", (lane_id,)).fetchall()
-        self.assertEqual(len(snapshots_after), 3)
-        snap_close = snapshots_after[2]
+        self.assertEqual(len(snapshots_after), 4)
+        snap_close = snapshots_after[3]
         
         # Position should be closed
         pos = self.executor.get_position(lane_id, symbol)
@@ -286,6 +286,66 @@ class PaperLoopTests(unittest.TestCase):
         self.assertLess(snap_close["realized_pnl"], 0.0)
         self.assertGreater(snap_close["max_drawdown_pct"], 1.0)
         self.assertGreater(snap_close["fees"], 6.0)
+
+    def test_pnl_and_drawdown_on_mark_move_only(self):
+        """
+        O1: Test that unrealized_pnl, equity, and max_drawdown_pct are computed and updated
+        correctly when only the market mark moves, BEFORE any CLOSE or next execution.
+        """
+        lane_id = "lane_1"
+        symbol = "BTC/USDC"
+        
+        # 1. Open position of 10 BTC/USDC @ $100
+        intent_open = ExecutionIntent(
+            execution_intent_id=str(uuid.uuid4()),
+            risk_decision_id=str(uuid.uuid4()),
+            mode="paper",
+            symbol=symbol,
+            action="OPEN",
+            side="BUY",
+            quantity=10.0,
+            stop_price=98.0,
+            take_profit_price=105.0,
+            client_order_id="order-open-pnl-only-mark",
+            created_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5)
+        )
+        res_open = self.executor.execute_intent(lane_id, intent_open, 100.0)
+        self.assertEqual(res_open.status, "FILLED")
+        
+        # Verify initial snapshot
+        cursor = self.executor.db.get_cursor()
+        snapshots = cursor.execute(
+            "SELECT equity, cash, realized_pnl, unrealized_pnl, fees, max_drawdown_pct "
+            "FROM arena_snapshots WHERE lane_id = ? ORDER BY id ASC", (lane_id,)
+        ).fetchall()
+        self.assertEqual(len(snapshots), 2)
+        snap_open = snapshots[1]
+        initial_equity = snap_open["equity"]
+        self.assertAlmostEqual(snap_open["unrealized_pnl"], 0.0)
+        
+        # 2. Move market mark down to $90 (no execution/close yet)
+        self.executor.update_market_mark(symbol, 90.0)
+        
+        # Verify that a new snapshot was automatically written with updated mark-to-market metrics
+        snapshots_after_mark = cursor.execute(
+            "SELECT equity, cash, realized_pnl, unrealized_pnl, fees, max_drawdown_pct "
+            "FROM arena_snapshots WHERE lane_id = ? ORDER BY id ASC", (lane_id,)
+        ).fetchall()
+        
+        # Should have inserted a 3rd snapshot for the mark update
+        self.assertEqual(len(snapshots_after_mark), 3)
+        snap_mark = snapshots_after_mark[2]
+        
+        # Equity should have decreased by 10 * (100 - 90) = 100
+        # Since adjusted fill price has slippage (100.0 * 1.0005 = 100.05), entry_price is 100.05.
+        # So unrealized_pnl should be 10 * (90 - 100.05) = -100.5
+        self.assertAlmostEqual(snap_mark["unrealized_pnl"], -100.5)
+        self.assertAlmostEqual(snap_mark["equity"], initial_equity - 100.0)
+        self.assertAlmostEqual(snap_mark["realized_pnl"], -6.0)
+        
+        # Max drawdown pct should be greater because equity decreased
+        self.assertGreater(snap_mark["max_drawdown_pct"], snap_open["max_drawdown_pct"])
 
     def test_loop_missing_lane_fails_closed(self):
         """

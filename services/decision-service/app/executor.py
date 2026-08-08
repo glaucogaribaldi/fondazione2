@@ -172,24 +172,87 @@ class PaperExecutor:
     def update_market_mark(self, symbol: str, price: float):
         """
         Maintains fresh per-symbol market marks in the database (Blocker G4).
+        Also updates PnL, equity, and drawdown on fresh market marks (O1).
         """
         conn = self.db.get_cursor()
         try:
             now_str = datetime.now(UTC).isoformat()
             if self.db.use_sqlite:
+                old_row = conn.execute("SELECT price FROM market_marks WHERE symbol = ?", (symbol,)).fetchone()
+                price_changed = (old_row is None) or (abs(old_row[0] - price) > 1e-9)
+
                 conn.execute(
                     "INSERT OR REPLACE INTO market_marks (symbol, price, updated_at) VALUES (?, ?, ?)",
                     (symbol, price, now_str)
                 )
                 self.db.sqlite_conn.commit()
+
+                if price_changed:
+                    # Update equity/drawdown/pnl for any active lane holding this symbol (O1)
+                    lanes = conn.execute(
+                        "SELECT DISTINCT lane_id FROM paper_positions WHERE symbol = ? AND quantity > 0",
+                        (symbol,)
+                    ).fetchall()
+                    for (lane_id,) in lanes:
+                        bal_row = conn.execute("SELECT cash FROM paper_balances WHERE lane_id = ?", (lane_id,)).fetchone()
+                        if bal_row:
+                            cash = bal_row[0]
+                            all_pos = conn.execute("SELECT symbol, quantity FROM paper_positions WHERE lane_id = ?", (lane_id,)).fetchall()
+                            mtm_value = 0.0
+                            for p_sym, p_qty in all_pos:
+                                if p_sym == symbol:
+                                    m_price = price
+                                else:
+                                    m_row = conn.execute("SELECT price FROM market_marks WHERE symbol = ?", (p_sym,)).fetchone()
+                                    m_price = m_row[0] if m_row else 0.0
+                                mtm_value += p_qty * m_price
+                            new_equity = cash + mtm_value
+                            conn.execute("UPDATE paper_balances SET equity = ? WHERE lane_id = ?", (new_equity, lane_id))
+                            self.db.sqlite_conn.commit()
+                            self._write_arena_snapshot(conn, None, lane_id, symbol, price, 0.0, is_sqlite=True)
+                            self.db.sqlite_conn.commit()
             else:
                 with conn:
-                    with conn.cursor() as cur:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        cur.execute("SELECT price FROM market_marks WHERE symbol = %s", (symbol,))
+                        old_row = cur.fetchone()
+                        price_changed = (old_row is None) or (abs(float(old_row["price"]) - price) > 1e-9)
+
                         cur.execute(
                             "INSERT INTO market_marks (symbol, price, updated_at) VALUES (%s, %s, %s) "
                             "ON CONFLICT (symbol) DO UPDATE SET price = EXCLUDED.price, updated_at = EXCLUDED.updated_at",
                             (symbol, price, datetime.now(UTC))
                         )
+                        
+                        if price_changed:
+                            # Update equity/drawdown/pnl for any active lane holding this symbol (O1)
+                            cur.execute(
+                                "SELECT DISTINCT lane_id FROM paper_positions WHERE symbol = %s AND quantity > 0",
+                                (symbol,)
+                            )
+                            lanes = cur.fetchall()
+                            for lane in lanes:
+                                lane_id = lane["lane_id"]
+                                cur.execute("SELECT cash FROM paper_balances WHERE lane_id = %s FOR UPDATE", (lane_id,))
+                                bal_row = cur.fetchone()
+                                if bal_row:
+                                    cash = float(bal_row["cash"])
+                                    cur.execute("SELECT symbol, quantity FROM paper_positions WHERE lane_id = %s", (lane_id,))
+                                    all_pos = cur.fetchall()
+                                    mtm_value = 0.0
+                                    for p in all_pos:
+                                        p_sym = p["symbol"]
+                                        p_qty = float(p["quantity"])
+                                        if p_sym == symbol:
+                                            m_price = price
+                                        else:
+                                            cur.execute("SELECT price FROM market_marks WHERE symbol = %s", (p_sym,))
+                                            m_row = cur.fetchone()
+                                            m_price = float(m_row["price"]) if m_row else 0.0
+                                        mtm_value += p_qty * m_price
+                                    new_equity = cash + mtm_value
+                                    cur.execute("UPDATE paper_balances SET equity = %s WHERE lane_id = %s", (new_equity, lane_id))
+                                    self._write_arena_snapshot(None, cur, lane_id, symbol, price, 0.0, is_sqlite=False)
         finally:
             if not self.db.use_sqlite:
                 conn.close()
