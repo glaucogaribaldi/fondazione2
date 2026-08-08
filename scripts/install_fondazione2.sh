@@ -130,6 +130,12 @@ docker compose --profile gpu up -d kronos nemotron
 echo "Launching Decision Service and QuantDinger processes..."
 docker compose up -d decision-service quantdinger-api quantdinger-worker quantdinger-scheduler quantdinger-celery quantdinger-celery-beat
 
+# Blocker M4: Patch QuantDinger container for canonical-ledger consumer integration
+echo "Patching QuantDinger container..."
+docker compose cp scripts/patch_quantdinger.py quantdinger-api:/tmp/patch_quantdinger.py
+docker compose exec -T -u root quantdinger-api python3 /tmp/patch_quantdinger.py /app/app/routes/agent_v1/trading_data.py
+docker compose restart quantdinger-api
+
 # Launch gateway and metrics
 echo "Launching Observability Stack..."
 docker compose --profile observability up -d prometheus grafana gateway

@@ -183,6 +183,7 @@ class HistoricalFailuresTests(unittest.TestCase):
                     cur.execute("DROP TABLE IF EXISTS execution_intents CASCADE")
                     cur.execute("DROP TABLE IF EXISTS execution_results CASCADE")
                     cur.execute("DROP TABLE IF EXISTS market_marks CASCADE")
+                    cur.execute("DROP TABLE IF EXISTS arena_snapshots CASCADE")
                     
                     cur.execute("""
                     CREATE TABLE paper_balances (
@@ -190,6 +191,18 @@ class HistoricalFailuresTests(unittest.TestCase):
                         lane_id TEXT NOT NULL UNIQUE,
                         equity NUMERIC(20, 8) NOT NULL,
                         cash NUMERIC(20, 8) NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE arena_snapshots (
+                        id BIGSERIAL PRIMARY KEY,
+                        lane_id TEXT NOT NULL,
+                        equity NUMERIC(20, 8) NOT NULL,
+                        cash NUMERIC(20, 8) NOT NULL,
+                        realized_pnl NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                        unrealized_pnl NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                        fees NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                        max_drawdown_pct NUMERIC(10, 4) NOT NULL DEFAULT 0,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
                     )""")
                     cur.execute("""
