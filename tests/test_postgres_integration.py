@@ -162,7 +162,7 @@ class TestPostgresIntegration(unittest.TestCase):
                 int(datetime.fromisoformat(c["candle_open"]).timestamp()),
                 c["low"], c["high"], c["open"], c["close"], c["volume"]
             ]
-            self.backfill_engine._ingest_and_validate_candles(self.prod, 300, raw_format)
+            self.backfill_engine._ingest_and_validate_candles(self.prod, 300, [raw_format])
             
         end = start + timedelta(minutes=25)
         dataset = self.replay_engine.load_dataset_from_db(["BTC/USDC"], 300, start, end, end, code_sha="test_sha_123", config_hash="v1")

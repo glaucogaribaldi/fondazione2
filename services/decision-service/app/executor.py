@@ -362,8 +362,35 @@ class DatabaseConnection:
                         volume NUMERIC(28,10) NOT NULL,
                         ingestion_timestamp TIMESTAMPTZ NOT NULL DEFAULT now(),
                         quality_state TEXT NOT NULL DEFAULT 'VALID',
+                        execution_product_id TEXT NOT NULL DEFAULT '',
+                        market_data_product_id TEXT NOT NULL DEFAULT '',
+                        market_data_is_proxy INTEGER NOT NULL DEFAULT 0,
+                        universe_version TEXT NOT NULL DEFAULT 'v1',
+                        source_provider TEXT NOT NULL DEFAULT 'coinbase',
+                        source_version TEXT NOT NULL DEFAULT 'v1',
                         PRIMARY KEY (product_id, granularity, candle_open)
                     )""")
+
+                    # Run schema migrations to add new columns to historical_candles on Postgres (B1)
+                    for col_def in [
+                        ("execution_product_id", "TEXT NOT NULL DEFAULT ''"),
+                        ("market_data_product_id", "TEXT NOT NULL DEFAULT ''"),
+                        ("market_data_is_proxy", "INTEGER NOT NULL DEFAULT 0"),
+                        ("universe_version", "TEXT NOT NULL DEFAULT 'v1'"),
+                        ("source_provider", "TEXT NOT NULL DEFAULT 'coinbase'"),
+                        ("source_version", "TEXT NOT NULL DEFAULT 'v1'")
+                    ]:
+                        cur.execute(f"""
+                            DO $$
+                            BEGIN
+                                BEGIN
+                                    ALTER TABLE historical_candles ADD COLUMN {col_def[0]} {col_def[1]};
+                                EXCEPTION
+                                    WHEN duplicate_column THEN NULL;
+                                END;
+                            END;
+                            $$;
+                        """)
                     cur.execute("""
                     CREATE TABLE IF NOT EXISTS historical_backfill_checkpoints (
                         product_id TEXT NOT NULL,
