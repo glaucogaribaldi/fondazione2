@@ -259,7 +259,7 @@ class CoinbaseBackfillEngine:
                     """, (
                         p.product_id, p.canonical_symbol, granularity, ts_val,
                         o, high, low, close, vol, quality_state,
-                        p.execution_product_id, p.market_data_product_id, p.market_data_is_proxy,
+                        p.execution_product_id, p.market_data_product_id, int(p.market_data_is_proxy),
                         "v1", "coinbase", "v1"
                     ))
 
