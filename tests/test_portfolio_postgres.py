@@ -188,6 +188,9 @@ class TestPortfolioPostgres(unittest.TestCase):
         """
         # Initialize with only 1500.0 USDC cash
         self.portfolio.initialize_portfolio(1500.0)
+        # Create an active position in BTC to boost total equity to 10000.0,
+        # so concentration limit is 3000.0, fully allowing 1000.0 requests!
+        self.portfolio.update_position("BTC/USDC", 0.1416666, 60000.0)
         
         marks = {"BTC/USDC": 60000.0}
         get_mark = lambda sym: marks.get(sym)
