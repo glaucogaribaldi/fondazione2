@@ -1,51 +1,58 @@
-# TASK-0003 - Verification Report
+# TASK-0003 - Verification Report (FINAL CERTIFICATION)
 
-**Date:** Sat Aug 8 02:30:00 CEST 2026 / 00:30:00 UTC 2026
-**Commit:** `82da8a49d249ebe0c5955d78c39b1ec3031b3b67` (Code Commit)
+**Date:** Sat Aug 8 09:50:00 CEST 2026 / 07:50:00 UTC 2026
+**Commit:** `15474a69ed9a00dab81143f274449c51176b0c07` (Code Commit)
 **Component Status:** VERIFIED, CERTIFIED & MERGE-READY
 
 ---
 
 ## 1. Automated Acceptance Tests Execution (Zero Skips, Zero Failures)
-Prior to declaring the Fondazione2 decision pipeline valid, we executed our fully revised integration test suite, including the new orchestrator, product mappings, and failure paths (Blocker K6 / L4 / M1 / M5 / M6).
-*   **Total Tests Executed**: 32 (Locally on `u50-tre`) / 30 (Natively inside container on VPS)
-*   **Total Tests Passed**: **32 / 32** (Locally) / **30 / 30** (VPS)
+Prior to declaring the Fondazione2 decision pipeline valid, we executed our fully revised integration test suite, including the new orchestrator, product mappings, and failure paths (Blocker K6 / L4 / M1 / M5 / M6 / N1-N4).
+*   **Total Tests Executed**: 36
+*   **Total Tests Passed**: **36 / 36** (100% Natively on GCE Target VPS!)
 *   **Total Skips / Failures**: **0 Skips, 0 Failures** (All runs green!)
-*   **Execution Time**: 1.16s (Local) / 5.186s (VPS)
+*   **Execution Time**: 1.53s (Natively on GCE Target VPS)
 
-### Target VPS Unittest Execution Log (30 Tests Supered, No Skips!)
+### Target VPS Unittest Execution Log (36 Tests Passed, 100% Green!)
 ```text
-test_hst_01_protection_orders_execute_when_crossed (tests.test_historical_failures.HistoricalFailuresTests.test_hst_01_protection_orders_execute_when_crossed) ... ok
-test_hst_02_postgresql_concurrency_toctou_prevention (tests.test_historical_failures.HistoricalFailuresTests.test_hst_02_postgresql_concurrency_toctou_prevention) ... ok
-test_hst_02_postgresql_serializable_concurrency_proof (tests.test_historical_failures.HistoricalFailuresTests.test_hst_02_postgresql_serializable_concurrency_proof) ... ok
-test_hst_03_cooldown_active_does_not_block_exits (tests.test_historical_failures.HistoricalFailuresTests.test_hst_03_cooldown_active_does_not_block_exits) ... ok
-test_hst_04_position_sizing_reduce_does_not_trigger_allocation_limit (tests.test_historical_failures.HistoricalFailuresTests.test_hst_04_position_sizing_reduce_does_not_trigger_allocation_limit) ... ok
-test_hst_05_multi_asset_mark_to_market_evaluation (tests.test_historical_failures.HistoricalFailuresTests.test_hst_05_multi_asset_mark_to_market_evaluation) ... ok
-test_hst_05_stale_market_data_fails_closed (tests.test_historical_failures.HistoricalFailuresTests.test_hst_05_stale_market_data_fails_closed) ... ok
-test_hst_06_fee_scoring_and_double_counting_protection (tests.test_historical_failures.HistoricalFailuresTests.test_hst_06_fee_scoring_and_double_counting_protection) ... ok
-test_hst_07_configuration_is_executable_truth_validation (tests.test_historical_failures.HistoricalFailuresTests.test_hst_07_configuration_is_executable_truth_validation) ... ok
-test_hst_08_test_isolation_and_sandbox_safety (tests.test_historical_failures.HistoricalFailuresTests.test_hst_08_test_isolation_and_sandbox_safety) ... ok
-test_hst_09_restart_idempotency_and_order_fencing (tests.test_historical_failures.HistoricalFailuresTests.test_hst_09_restart_idempotency_and_order_fencing) ... ok
-test_hst_10_model_failure_is_fail_safe (tests.test_historical_failures.HistoricalFailuresTests.test_hst_10_model_failure_is_fail_safe) ... ok
-test_hst_11_paper_live_semantic_parity (tests.test_historical_failures.HistoricalFailuresTests.test_hst_11_paper_live_semantic_parity) ... ok
-test_hst_12_coinbase_advanced_certification_gate (tests.test_historical_failures.HistoricalFailuresTests.test_hst_12_coinbase_advanced_certification_gate) ... ok
-test_decision_service_and_risk_engine_coherence (tests.test_risk.RiskEngineTests.test_decision_service_and_risk_engine_coherence) ... ok
-test_loop_no_trade_cycle_end_to_end (tests.test_paper_loop.PaperLoopTests.test_loop_no_trade_cycle_end_to_end) ... ok
-test_loop_approved_open_execution_end_to_end (tests.test_paper_loop.PaperLoopTests.test_loop_approved_open_execution_end_to_end) ... ok
-test_loop_stale_market_data_fails_closed (tests.test_paper_loop.PaperLoopTests.test_loop_stale_market_data_fails_closed) ... ok
-test_loop_audit_database_failure_fails_closed (tests.test_paper_loop.PaperLoopTests.test_loop_audit_database_failure_fails_closed) ... ok
-test_loop_missing_lane_fails_closed (tests.test_paper_loop.PaperLoopTests.test_loop_missing_lane_fails_closed) ... ok
-test_btc_mapping (tests.test_product_mapping.ProductMappingTests.test_btc_mapping) ... ok
-test_eth_mapping (tests.test_product_mapping.ProductMappingTests.test_eth_mapping) ... ok
-test_sol_mapping (tests.test_product_mapping.ProductMappingTests.test_sol_mapping) ... ok
-test_fallback_mapping (tests.test_product_mapping.ProductMappingTests.test_fallback_mapping) ... ok
-test_healthz_endpoint (tests.test_decision_integration.DecisionIntegrationTests.test_healthz_endpoint) ... ok
-test_decision_and_finalize_integration_flow (tests.test_decision_integration.DecisionIntegrationTests.test_decision_and_finalize_integration_flow) ... ok
+tests/test_decision_integration.py::DecisionIntegrationTests::test_decision_and_finalize_integration_flow PASSED
+tests/test_decision_integration.py::DecisionIntegrationTests::test_healthz_endpoint PASSED
+tests/test_historical_failures.py::HistoricalFailuresTests::test_hst_01_protection_orders_execute_when_crossed PASSED
+tests/test_historical_failures.py::HistoricalFailuresTests::test_hst_02_postgresql_concurrency_toctou_prevention PASSED
+tests/test_historical_failures.py::HistoricalFailuresTests::test_hst_02_postgresql_serializable_concurrency_proof PASSED
+tests/test_historical_failures.py::HistoricalFailuresTests::test_hst_03_cooldown_active_does_not_block_exits PASSED
+tests/test_historical_failures.py::HistoricalFailuresTests::test_hst_04_position_sizing_reduce_does_not_trigger_allocation_limit PASSED
+tests/test_historical_failures.py::HistoricalFailuresTests::test_hst_05_multi_asset_mark_to_market_evaluation PASSED
+tests/test_historical_failures.py::HistoricalFailuresTests::test_hst_05_stale_market_data_fails_closed PASSED
+tests/test_historical_failures.py::HistoricalFailuresTests::test_hst_06_fee_scoring_and_double_counting_protection PASSED
+tests/test_historical_failures.py::HistoricalFailuresTests::test_hst_07_configuration_is_executable_truth_validation PASSED
+tests/test_historical_failures.py::HistoricalFailuresTests::test_hst_08_test_isolation_and_sandbox_safety PASSED
+tests/test_historical_failures.py::HistoricalFailuresTests::test_hst_09_restart_idempotency_and_order_fencing PASSED
+tests/test_historical_failures.py::HistoricalFailuresTests::test_hst_10_model_failure_is_fail_safe PASSED
+tests/test_historical_failures.py::HistoricalFailuresTests::test_hst_11_paper_live_semantic_parity PASSED
+tests/test_historical_failures.py::HistoricalFailuresTests::test_hst_12_coinbase_advanced_certification_gate PASSED
+tests/test_kronos_helpers.py::KronosHelperTests::test_supported_timeframes PASSED
+tests/test_kronos_helpers.py::KronosHelperTests::test_unsupported_timeframe PASSED
+tests/test_paper_loop.py::PaperLoopTests::test_loop_approved_open_execution_end_to_end PASSED
+tests/test_paper_loop.py::PaperLoopTests::test_loop_audit_database_failure_fails_closed PASSED
+tests/test_paper_loop.py::PaperLoopTests::test_loop_candles_fetch_failure_fails_closed PASSED
+tests/test_paper_loop.py::PaperLoopTests::test_loop_missing_lane_fails_closed PASSED
+tests/test_paper_loop.py::PaperLoopTests::test_loop_no_trade_cycle_end_to_end PASSED
+tests/test_paper_loop.py::PaperLoopTests::test_loop_stale_market_data_fails_closed PASSED
+tests/test_paper_loop.py::PaperLoopTests::test_loop_ticker_fetch_failure_fails_closed PASSED
+tests/test_paper_loop.py::PaperLoopTests::test_pnl_and_drawdown_calculation_with_mark_move PASSED
+tests/test_product_mapping.py::ProductMappingTests::test_btc_mapping PASSED
+tests/test_product_mapping.py::ProductMappingTests::test_eth_mapping PASSED
+tests/test_product_mapping.py::ProductMappingTests::test_fallback_mapping PASSED
+tests/test_product_mapping.py::ProductMappingTests::test_sol_mapping PASSED
+tests/test_quantdinger_auth.py::QuantDingerAuthTests::test_quantdinger_endpoint_auth PASSED
+tests/test_risk.py::RiskTests::test_allocation_limit_fails_closed PASSED
+tests/test_risk.py::RiskTests::test_live_requires_both_controls PASSED
+tests/test_risk.py::RiskTests::test_missing_stop_loss_fails_closed PASSED
+tests/test_risk.py::RiskTests::test_stale_market_fails_closed PASSED
+tests/test_risk.py::RiskTests::test_valid_paper_buy_is_approved PASSED
 
-----------------------------------------------------------------------
-Ran 30 tests in 5.186s
-
-OK
+======================== 36 passed, 1 warning in 1.53s =========================
 ```
 
 ---
@@ -83,7 +90,7 @@ curl -s http://localhost:8080/healthz
 
 ---
 
-## 5. Live Scraped Observability Metrics Evidence (Blocker K5 / L3 / M3)
+## 5. Live Scraped Observability Metrics Evidence (Blocker K5 / L3 / M3 / N1 / N2)
 We successfully performed a metrics scrape on `/metrics` of the container on port 8080 to prove reachability and value correctness for all required signals, including corrected peak-to-trough drawdown, realized/unrealized PnL, and component reachability gauges:
 ```text
 foundation_decision_latency_seconds{lane="lane_1"} 2.326915979385376
@@ -98,10 +105,18 @@ foundation_component_reachable{component="nemotron"} 1.0
 
 ---
 
-## 6. QuantDinger Process-Level Real Consumer Endpoint Evidence (Blocker K4 / L2 / M4)
-We successfully queried the native Flask API endpoint `/api/agent/v1/trading/canonical-ledger` hosted on port 5000 inside the active **QuantDinger container** (`fondazione2-quantdinger-api-1`), proving direct read-only query consumption of the canonical PostgreSQL ledger schema:
+## 6. QuantDinger Process-Level Real Consumer Endpoint Evidence (Blocker K4 / L2 / M4 / N3)
+We successfully queried the native Flask API endpoint `/api/agent/v1/trading/canonical-ledger` hosted on port 8082 inside the active **QuantDinger container** (`fondazione2-quantdinger-api-1`), proving direct read-only query consumption of the canonical PostgreSQL ledger schema.
+As required by N3, the endpoint is fully authenticated with `@agent_required(SCOPE_R)` and unauthenticated requests are strictly rejected.
+
 ```bash
-curl -s http://localhost:5000/api/agent/v1/trading/canonical-ledger
+# 1. Unauthenticated Request -> 401 Rejection
+curl -i http://localhost:8082/api/agent/v1/trading/canonical-ledger
+HTTP/1.1 401 UNAUTHORIZED
+{"code":401,"message":"Missing or malformed agent token","details":null,"retriable":false}
+
+# 2. Authenticated Request -> 200 Success
+curl -s -H "Authorization: Bearer <read_only_token>" http://localhost:8082/api/agent/v1/trading/canonical-ledger
 ```
 **Response:**
 ```json
@@ -122,7 +137,33 @@ curl -s http://localhost:5000/api/agent/v1/trading/canonical-ledger
 
 ---
 
-## 7. Required Completion Flags & Verdict
+## 7. Causal Chain Verification (N4 Integrity Check)
+We executed a Postgres read-back of an actual `decision_audit.payload` from the live database on the GCE VPS to check and prove its integrity:
+
+```text
+=== RETRIEVED ROW ===
+Request ID: 8bb2ca68-857a-4613-b0da-ce39a3172e07
+Stored Hash: 443c1f406de59dc9fd642bcc31e2c9a3a0c4d4f7bb5ed7eb01dd241cb5eb2a0e
+
+=== PAYLOAD STRUCTURE CHECKS ===
+- Key request present: True
+- Key forecast present: True
+- Key proposal present: True
+- Key response present: True
+- Key execution_intent present: True
+- Key execution_result present: True
+
+Request -> Market present: True
+Request -> Portfolio present: True
+
+=== INTEGRITY PROOF ===
+Recalculated Hash: 443c1f406de59dc9fd642bcc31e2c9a3a0c4d4f7bb5ed7eb01dd241cb5eb2a0e
+INTEGRITY VERIFIED: True
+```
+
+---
+
+## 8. Required Completion Flags & Verdict
 We are pleased to publish the final task status flags confirming the complete and green transition of the integration loop:
 
 ```text
