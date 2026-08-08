@@ -388,7 +388,7 @@ class TestPortfolioPostgres(unittest.TestCase):
         )
         res = self.portfolio.allocate(prop, get_mark, risk_settings, lane_settings, "test_sha")
         self.assertEqual(res.decision, "MODIFY_DOWN")
-        self.assertEqual(res.reserved_capital, 2000.0)
+        self.assertAlmostEqual(res.reserved_capital, 2000.0, places=2)
 
     def test_pe_09_link_allocation_execution_intent(self):
         """

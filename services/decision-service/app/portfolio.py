@@ -110,8 +110,7 @@ class PortfolioEngine:
 
     def initialize_portfolio(self, initial_cash_usdc: float):
         """
-        Initializes the shared capital portfolio with a base USDC cash balance.
-        If the balance row already exists, we update it to the requested initial cash (Requirement #1 / #11).
+        Initializes the shared capital portfolio with a base USDC cash balance only if not already present (Requirement D1).
         """
         with self._get_db_cursor_context() as cur:
             # 1. Initialize cash
@@ -119,7 +118,7 @@ class PortfolioEngine:
                 cur.execute("""
                     INSERT INTO portfolio_cash (currency, cash, reserved) 
                     VALUES (?, ?, 0.0)
-                    ON CONFLICT(currency) DO UPDATE SET cash = EXCLUDED.cash
+                    ON CONFLICT(currency) DO NOTHING
                 """, (self.base_currency, initial_cash_usdc))
                 cur.execute(
                     "INSERT OR IGNORE INTO portfolio_metadata (key, value) VALUES ('peak_equity', ?)",
@@ -135,13 +134,14 @@ class PortfolioEngine:
                 cur.execute("""
                     INSERT INTO portfolio_cash (currency, cash, reserved) 
                     VALUES (%s, %s, 0)
-                    ON CONFLICT (currency) DO UPDATE SET cash = EXCLUDED.cash
+                    ON CONFLICT (currency) DO NOTHING
                 """, (self.base_currency, initial_cash_usdc))
                 
                 cur.execute("""
                     INSERT INTO portfolio_metadata (key, value) 
                     VALUES ('peak_equity', %s)
                     ON CONFLICT (key) DO NOTHING
+                """, (str(initial_cash_usdc),))
                 """, (str(initial_cash_usdc),))
                 
                 cur.execute("""
