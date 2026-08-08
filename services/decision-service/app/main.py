@@ -72,7 +72,47 @@ async def startup_event():
 
 @app.get("/v1/universe/summary")
 async def get_universe_summary():
-    return registry.get_metrics_summary(get_fresh_db_mark)
+    # Fetch all marks in a single query to avoid opening 832 sequential connections (Blocker S1 Performance)
+    marks_cache = {}
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url or db_url.startswith("sqlite"):
+        try:
+            conn = sqlite3.connect("file:fondazione_test?mode=memory&cache=shared", uri=True)
+            cursor = conn.cursor()
+            rows = cursor.execute("SELECT symbol, price, updated_at FROM market_marks").fetchall()
+            conn.close()
+            now = datetime.now(UTC)
+            for r_sym, r_price, r_updated in rows:
+                try:
+                    updated_at = datetime.fromisoformat(r_updated)
+                except ValueError:
+                    updated_at = now
+                age = (now - updated_at).total_seconds()
+                if abs(age) <= 90.0:
+                    marks_cache[r_sym] = float(r_price)
+        except Exception:
+            pass
+    else:
+        try:
+            conn = psycopg2.connect(db_url)
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT symbol, price, updated_at FROM market_marks")
+                    rows = cur.fetchall()
+                    now = datetime.now(UTC)
+                    for r_sym, r_price, r_updated in rows:
+                        age = (now - r_updated).total_seconds()
+                        if abs(age) <= 90.0:
+                            marks_cache[r_sym] = float(r_price)
+            conn.close()
+        except Exception:
+            pass
+
+    # Simple local dictionary lookup function
+    def cached_get_mark(symbol: str) -> float | None:
+        return marks_cache.get(symbol)
+
+    return registry.get_metrics_summary(cached_get_mark)
 
 @app.get("/v1/universe/products")
 async def get_universe_products(limit: int = 100):
