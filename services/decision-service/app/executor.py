@@ -82,7 +82,8 @@ class DatabaseConnection:
             time_exit_at TEXT,
             client_order_id TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            expires_at TEXT NOT NULL
+            expires_at TEXT NOT NULL,
+            allocation_id TEXT
         )""")
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS execution_results (
@@ -344,8 +345,22 @@ class DatabaseConnection:
                         time_exit_at TIMESTAMPTZ,
                         client_order_id TEXT NOT NULL UNIQUE,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        expires_at TIMESTAMPTZ NOT NULL
+                        expires_at TIMESTAMPTZ NOT NULL,
+                        allocation_id TEXT
                     )""")
+
+                    # Run schema migrations to add allocation_id to execution_intents on Postgres (D5)
+                    cur.execute("""
+                        DO $$
+                        BEGIN
+                            BEGIN
+                                ALTER TABLE execution_intents ADD COLUMN allocation_id TEXT;
+                            EXCEPTION
+                                WHEN duplicate_column THEN NULL;
+                            END;
+                        END;
+                        $$;
+                    """)
                     cur.execute("""
                     CREATE TABLE IF NOT EXISTS execution_results (
                         id BIGSERIAL PRIMARY KEY,
@@ -1011,12 +1026,30 @@ class PaperExecutor:
                 # Update positions in PortfolioEngine
                 self.portfolio_engine.update_position(intent.symbol, new_qty, new_entry, intent.stop_price, intent.take_profit_price)
 
-                # Insert Intent & Result (atomically saving H2 reason codes)
+                # Load fresh MTM snapshot from PortfolioEngine to sync derived compatibility states (D6 - One Accounting Truth)
+                def get_mark_func(sym: str) -> float | None:
+                    m = self.get_market_mark(sym)
+                    return m["price"] if m else None
+                snap = self.portfolio_engine.load_portfolio_snapshot(get_mark_func)
+                
+                new_cash = snap.cash.get(self.portfolio_engine.base_currency, 10000.0)
+                new_equity = snap.equity
+                conn.execute("UPDATE paper_balances SET cash = ?, equity = ? WHERE lane_id = ?", (new_cash, new_equity, lane_id))
+                
+                # Sync paper_positions with snap.positions
+                conn.execute("DELETE FROM paper_positions WHERE lane_id = ?", (lane_id,))
+                for pos_sym, pos_data in snap.positions.items():
+                    conn.execute("""
+                        INSERT INTO paper_positions (lane_id, symbol, quantity, entry_price, stop_loss_price, take_profit_price)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (lane_id, pos_sym, pos_data["quantity"], pos_data["entry_price"], pos_data["stop_loss_price"], pos_data["take_profit_price"]))
+
+                # Insert Intent & Result with allocation_id (D5)
                 broker_id = f"paper-{uuid.uuid4()}"
                 conn.execute(
-                    "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, str(intent.time_exit_at), intent.client_order_id, str(intent.expires_at))
+                    "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at, allocation_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, str(intent.time_exit_at), intent.client_order_id, str(intent.expires_at), allocation_id)
                 )
                 final_reasons = reasons_list + ["EXECUTED_PAPER"]
                 conn.execute(
@@ -1189,12 +1222,30 @@ class PaperExecutor:
                         # Update positions in PortfolioEngine
                         self.portfolio_engine.update_position(intent.symbol, new_qty, new_entry, intent.stop_price, intent.take_profit_price)
 
-                        # Save Intent & Result (atomically saving H2 reason codes)
+                        # Load fresh MTM snapshot from PortfolioEngine to sync derived compatibility states (D6 - One Accounting Truth)
+                        def get_mark_func(sym: str) -> float | None:
+                            m = self.get_market_mark(sym)
+                            return m["price"] if m else None
+                        snap = self.portfolio_engine.load_portfolio_snapshot(get_mark_func)
+                        
+                        new_cash = snap.cash.get(self.portfolio_engine.base_currency, 10000.0)
+                        new_equity = snap.equity
+                        cur.execute("UPDATE paper_balances SET cash = %s, equity = %s WHERE lane_id = %s", (new_cash, new_equity, lane_id))
+                        
+                        # Sync paper_positions with snap.positions
+                        cur.execute("DELETE FROM paper_positions WHERE lane_id = %s", (lane_id,))
+                        for pos_sym, pos_data in snap.positions.items():
+                            cur.execute("""
+                                INSERT INTO paper_positions (lane_id, symbol, quantity, entry_price, stop_loss_price, take_profit_price)
+                                VALUES (%s, %s, %s, %s, %s, %s)
+                            """, (lane_id, pos_sym, pos_data["quantity"], pos_data["entry_price"], pos_data["stop_loss_price"], pos_data["take_profit_price"]))
+
+                        # Save Intent & Result with allocation_id (D5)
                         broker_id = f"paper-{uuid.uuid4()}"
                         cur.execute(
-                            "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at) "
-                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                            (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, intent.time_exit_at, intent.client_order_id, intent.expires_at)
+                            "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at, allocation_id) "
+                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                            (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, intent.time_exit_at, intent.client_order_id, intent.expires_at, allocation_id)
                         )
                         final_reasons = reasons_list + ["EXECUTED_PAPER"]
                         cur.execute(
@@ -1264,9 +1315,9 @@ class PaperExecutor:
     def _reject_intent(self, conn, intent: ExecutionIntent, reason: str, extra_reasons: list[str] | None = None) -> ExecutionResult:
         broker_id = "rejected-order"
         conn.execute(
-            "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, str(intent.time_exit_at), intent.client_order_id, str(intent.expires_at))
+            "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at, allocation_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, str(intent.time_exit_at), intent.client_order_id, str(intent.expires_at), intent.allocation_id)
         )
         final_reasons = (extra_reasons or []) + [reason]
         conn.execute(
@@ -1289,9 +1340,9 @@ class PaperExecutor:
     def _reject_intent_postgres(self, cur, intent: ExecutionIntent, reason: str, extra_reasons: list[str] | None = None) -> ExecutionResult:
         broker_id = "rejected-order"
         cur.execute(
-            "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, intent.time_exit_at, intent.client_order_id, intent.expires_at)
+            "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at, allocation_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, intent.time_exit_at, intent.client_order_id, intent.expires_at, intent.allocation_id)
         )
         final_reasons = (extra_reasons or []) + [reason]
         cur.execute(

@@ -409,6 +409,7 @@ async def decide(request: DecisionRequest) -> DecisionResponse:
         approved_by_risk_engine=result.approved,
         reason_codes=list(result.reasons),
         model_versions=model_versions,
+        allocation_id=alloc_id
     )
 
     # Blocker K2 & L1: Stable SHA-256 digest & complete causal chain persistence (MarketSnapshot, Forecast, Proposal, Response)

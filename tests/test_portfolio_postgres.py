@@ -251,5 +251,237 @@ class TestPortfolioPostgres(unittest.TestCase):
         self.assertEqual(snap1.digest, snap2.digest)
         self.assertEqual(snap1.version, snap2.version)
 
+    def test_pe_05_restart_non_distruttivo(self):
+        """
+        D1: Verify restart does NOT reset cash or positions.
+        """
+        self.portfolio.initialize_portfolio(10000.0)
+        
+        # Simulate active state changes (spend cash)
+        with self.portfolio._get_db_cursor_context() as cur:
+            cur.execute("UPDATE portfolio_cash SET cash = 9935.50 WHERE currency = 'USDC'")
+            cur.execute("INSERT INTO portfolio_positions (symbol, quantity, entry_price) VALUES ('BTC/USDC', 0.1, 60000.0)")
+
+        # Recreate engine and run initialization path again
+        new_engine = PortfolioEngine(db_url=self.postgres_url)
+        new_engine.initialize_portfolio(10000.0)
+        
+        # Verify cash has NOT been overwritten back to 10000.0!
+        snap = new_engine.load_portfolio_snapshot(lambda s: 60000.0)
+        self.assertEqual(snap.cash["USDC"], 9935.50)
+        self.assertEqual(snap.positions["BTC/USDC"]["quantity"], 0.1)
+
+    def test_pe_06_invalid_portfolio_valuation(self):
+        """
+        D2: Verify stale/missing marks fail closed for new entries but not exits.
+        """
+        self.portfolio.initialize_portfolio(10000.0)
+        self.portfolio.update_position("BTC/USDC", 0.1, 60000.0)
+        
+        # BTC/USDC mark is missing/None (stale/invalid valuation)
+        get_mark = lambda s: None
+        
+        snap = self.portfolio.load_portfolio_snapshot(get_mark)
+        self.assertFalse(snap.valuation_valid)
+        self.assertIn("BTC/USDC", snap.stale_missing_marks)
+
+        risk_settings = load_risk_settings()
+        _, lane_settings = load_lane_settings("lane_1")
+
+        # New entry OPEN must be rejected fail-closed!
+        prop_open = AllocationProposal(
+            proposal_id="prop-open-fail",
+            symbol="ETH/USDC",
+            action="OPEN",
+            requested_risk_fraction=0.05,
+            requested_notional=500.0
+        )
+        res_open = self.portfolio.allocate(prop_open, get_mark, risk_settings, lane_settings, "test_sha")
+        self.assertEqual(res_open.decision, "REJECT")
+        self.assertIn("PORTFOLIO_VALUATION_INVALID", res_open.reason_codes)
+
+        # Protective exit CLOSE must be approved bypassingly!
+        prop_exit = AllocationProposal(
+            proposal_id="prop-exit-bypass",
+            symbol="BTC/USDC",
+            action="CLOSE",
+            requested_risk_fraction=1.0,
+            requested_notional=6000.0
+        )
+        res_exit = self.portfolio.allocate(prop_exit, get_mark, risk_settings, lane_settings, "test_sha")
+        self.assertEqual(res_exit.decision, "APPROVE")
+
+    def test_pe_07_concurrency_safety_real(self):
+        """
+        D3: Real PostgreSQL concurrent allocations serializable conflict and retry test.
+        """
+        import threading
+        self.portfolio.initialize_portfolio(1500.0)
+        
+        marks = {"BTC/USDC": 60000.0}
+        get_mark = lambda s: marks.get(s)
+        
+        risk_settings = load_risk_settings()
+        _, lane_settings = load_lane_settings("lane_1")
+        import dataclasses
+        lane_settings = dataclasses.replace(lane_settings, max_position_pct=80.0)
+
+        results = []
+        def run_allocation(prop_id):
+            prop = AllocationProposal(
+                proposal_id=prop_id,
+                symbol="BTC/USDC",
+                action="OPEN",
+                requested_risk_fraction=0.10,
+                requested_notional=1000.0
+            )
+            try:
+                res = self.portfolio.allocate(prop, get_mark, risk_settings, lane_settings, "test_sha")
+                results.append(res)
+            except Exception as e:
+                print(f"Concurrent thread failed: {e}")
+
+        # Spawn two threads starting together
+        t1 = threading.Thread(target=run_allocation, args=("concurrent-1",))
+        t2 = threading.Thread(target=run_allocation, args=("concurrent-2",))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        # Both must succeed without throwing exception due to serializable conflict automatic retries.
+        self.assertEqual(len(results), 2)
+        
+        # Together they must NEVER oversubscribe available cash budget of 1500.0!
+        total_reserved = sum(r.reserved_capital for r in results)
+        self.assertEqual(total_reserved, 1500.0)
+
+    def test_pe_08_add_remaining_capacity(self):
+        """
+        D4: Verify ADD checks subtract current exposure from capacity limit.
+        """
+        self.portfolio.initialize_portfolio(10000.0)
+        
+        # Position exists with $4,000 value (quantity 0.066666, entry price 60000)
+        self.portfolio.update_position("BTC/USDC", 0.066666, 60000.0)
+        
+        marks = {"BTC/USDC": 60000.0}
+        get_mark = lambda s: marks.get(s)
+        
+        risk_settings = load_risk_settings()
+        _, lane_settings = load_lane_settings("lane_1")
+        import dataclasses
+        # Limit to 50% max position = $5,000 limit
+        lane_settings = dataclasses.replace(lane_settings, max_position_pct=50.0)
+
+        # ADD of $2,000 must be scaled down to $1,000!
+        prop = AllocationProposal(
+            proposal_id="prop-add",
+            symbol="BTC/USDC",
+            action="ADD",
+            requested_risk_fraction=0.20,
+            requested_notional=2000.0
+        )
+        res = self.portfolio.allocate(prop, get_mark, risk_settings, lane_settings, "test_sha")
+        self.assertEqual(res.decision, "MODIFY_DOWN")
+        self.assertEqual(res.reserved_capital, 1000.0) # $5,000 - $4,000 = $1,000!
+
+    def test_pe_09_link_allocation_execution_intent(self):
+        """
+        D5: Verify PENDING allocations without relative ExecutionIntents are marked RELEASED.
+        """
+        self.portfolio.initialize_portfolio(10000.0)
+        
+        # Save a PENDING allocation with ID 'alloc-xyz-1'
+        self.portfolio._persist_allocation_audit_tx(
+            self.portfolio.db.get_cursor(),
+            allocation_id="alloc-xyz-1",
+            proposal_id="prop-xyz-1",
+            symbol="BTC/USDC",
+            action="OPEN",
+            req_risk=0.10,
+            app_risk=0.10,
+            req_notional=1000.0,
+            app_notional=1000.0,
+            reserved=1000.0,
+            status="PENDING",
+            reason_codes=[],
+            port_version=1,
+            port_digest="digest-1",
+            marks_provenance={},
+            config_hash="v1",
+            code_sha="test_sha"
+        )
+        self.portfolio.reserve_capital("alloc-xyz-1", "USDC", 1000.0)
+        
+        # Save another PENDING allocation with ID 'alloc-xyz-2' (this one HAS an ExecutionIntent!)
+        self.portfolio._persist_allocation_audit_tx(
+            self.portfolio.db.get_cursor(),
+            allocation_id="alloc-xyz-2",
+            proposal_id="prop-xyz-2",
+            symbol="BTC/USDC",
+            action="OPEN",
+            req_risk=0.10,
+            app_risk=0.10,
+            req_notional=1000.0,
+            app_notional=1000.0,
+            reserved=1000.0,
+            status="PENDING",
+            reason_codes=[],
+            port_version=2,
+            port_digest="digest-2",
+            marks_provenance={},
+            config_hash="v1",
+            code_sha="test_sha"
+        )
+        self.portfolio.reserve_capital("alloc-xyz-2", "USDC", 1000.0)
+
+        # Write ExecutionIntent linking alloc-xyz-2
+        with self.portfolio._get_db_cursor_context() as cur:
+            cur.execute("""
+                INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, client_order_id, expires_at, allocation_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (str(uuid.uuid4()), "prop-xyz-2", "paper", "BTC/USDC", "OPEN", "BUY", 0.1, "MARKET", "client-ord-xyz", (datetime.now(UTC) + timedelta(minutes=5)).isoformat(), "alloc-xyz-2"))
+
+        # Reconcile orphan reservations
+        self.portfolio.reconcile_orphan_reservations()
+        
+        # Verify alloc-xyz-1 is RELEASED
+        with self.portfolio._get_db_cursor_context() as cur:
+            cur.execute("SELECT status FROM portfolio_allocations WHERE allocation_id = 'alloc-xyz-1'")
+            self.assertEqual(cur.fetchone()["status"], "RELEASED")
+            
+            # Verify alloc-xyz-2 remains PENDING
+            cur.execute("SELECT status FROM portfolio_allocations WHERE allocation_id = 'alloc-xyz-2'")
+            self.assertEqual(cur.fetchone()["status"], "PENDING")
+
+    def test_pe_10_risk_fraction_bound(self):
+        """
+        D7: Verify requested_risk_fraction bounds approved_notional and approved_risk_fraction.
+        """
+        self.portfolio.initialize_portfolio(10000.0)
+        
+        marks = {"BTC/USDC": 60000.0}
+        get_mark = lambda s: marks.get(s)
+        
+        risk_settings = load_risk_settings()
+        _, lane_settings = load_lane_settings("lane_1")
+        import dataclasses
+        lane_settings = dataclasses.replace(lane_settings, max_position_pct=80.0)
+
+        # Requested risk fraction is 1% ($100.0 limit), but requested_notional is $5,000.
+        # Allocator must MODIFY_DOWN to $100.0!
+        prop = AllocationProposal(
+            proposal_id="prop-risk-bound",
+            symbol="BTC/USDC",
+            action="OPEN",
+            requested_risk_fraction=0.01, # 1% limit
+            requested_notional=5000.0
+        )
+        res = self.portfolio.allocate(prop, get_mark, risk_settings, lane_settings, "test_sha")
+        
+        self.assertEqual(res.decision, "MODIFY_DOWN")
+        self.assertEqual(res.reserved_capital, 10000.0 * 0.01) # exactly 100.0!
+
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,10 @@ class PortfolioSnapshot(BaseModel):
     peak_equity: float
     version: int
     digest: str
+    valuation_valid: bool = True
+    valuation_reason_codes: List[str] = Field(default_factory=list)
+    stale_missing_marks: List[str] = Field(default_factory=list)
+    stale_missing_conversion_paths: List[str] = Field(default_factory=list)
 
 class AllocationProposal(BaseModel):
     proposal_id: str
@@ -152,22 +156,34 @@ class PortfolioEngine:
                     ON CONFLICT (key) DO NOTHING
                 """)
 
-    def load_portfolio_snapshot(self, get_mark_func) -> PortfolioSnapshot:
+    def load_portfolio_snapshot(self, get_mark_func, cur=None) -> PortfolioSnapshot:
         """
-        Loads the PostgreSQL-backed versioned portfolio state and computes full MTM valuation (Requirement #1 / #2 / #10).
+        Loads the PostgreSQL-backed versioned portfolio state and computes full MTM valuation (Requirement #1 / #2 / #10 / D2).
         """
-        with self._get_db_cursor_context() as cur:
+        if cur is None:
+            ctx = self._get_db_cursor_context()
+        else:
+            class DummyContext:
+                def __init__(self, c):
+                    self.c = c
+                def __enter__(self):
+                    return self.c
+                def __exit__(self, exc_type, exc_val, exc_tb):
+                    pass
+            ctx = DummyContext(cur)
+
+        with ctx as active_cur:
             # 1. Load Cash Balances
             cash_balances = {}
             reserved_balances = {}
             if self.db.use_sqlite:
-                rows = cur.execute("SELECT currency, cash, reserved FROM portfolio_cash").fetchall()
+                rows = active_cur.execute("SELECT currency, cash, reserved FROM portfolio_cash").fetchall()
                 for r in rows:
                     cash_balances[r[0]] = float(r[1])
                     reserved_balances[r[0]] = float(r[2])
             else:
-                cur.execute("SELECT currency, cash, reserved FROM portfolio_cash")
-                rows = cur.fetchall()
+                active_cur.execute("SELECT currency, cash, reserved FROM portfolio_cash")
+                rows = active_cur.fetchall()
                 for r in rows:
                     cash_balances[r["currency"]] = float(r["cash"])
                     reserved_balances[r["currency"]] = float(r["reserved"])
@@ -175,7 +191,7 @@ class PortfolioEngine:
             # 2. Load Positions
             positions = {}
             if self.db.use_sqlite:
-                rows = cur.execute("SELECT symbol, quantity, entry_price, realized_pnl, unrealized_pnl, stop_loss_price, take_profit_price FROM portfolio_positions").fetchall()
+                rows = active_cur.execute("SELECT symbol, quantity, entry_price, realized_pnl, unrealized_pnl, stop_loss_price, take_profit_price FROM portfolio_positions").fetchall()
                 for r in rows:
                     positions[r[0]] = {
                         "symbol": r[0],
@@ -187,8 +203,8 @@ class PortfolioEngine:
                         "take_profit_price": float(r[6]) if r[6] is not None else None
                     }
             else:
-                cur.execute("SELECT symbol, quantity, entry_price, realized_pnl, unrealized_pnl, stop_loss_price, take_profit_price FROM portfolio_positions")
-                rows = cur.fetchall()
+                active_cur.execute("SELECT symbol, quantity, entry_price, realized_pnl, unrealized_pnl, stop_loss_price, take_profit_price FROM portfolio_positions")
+                rows = active_cur.fetchall()
                 for r in rows:
                     positions[r["symbol"]] = {
                         "symbol": r["symbol"],
@@ -203,12 +219,12 @@ class PortfolioEngine:
             # 3. Load Metadata
             metadata = {}
             if self.db.use_sqlite:
-                rows = cur.execute("SELECT key, value FROM portfolio_metadata").fetchall()
+                rows = active_cur.execute("SELECT key, value FROM portfolio_metadata").fetchall()
                 for r in rows:
                     metadata[r[0]] = r[1]
             else:
-                cur.execute("SELECT key, value FROM portfolio_metadata")
-                rows = cur.fetchall()
+                active_cur.execute("SELECT key, value FROM portfolio_metadata")
+                rows = active_cur.fetchall()
                 for r in rows:
                     metadata[r["key"]] = r["value"]
 
@@ -218,12 +234,19 @@ class PortfolioEngine:
         # 4. Perform Multi-Quote MTM Valuation & Exposure Calculation
         base_currency_cash = cash_balances.get(self.base_currency, 0.0)
         converted_other_cash = 0.0
+        
+        stale_missing_marks = []
+        stale_missing_conversion_paths = []
+        valuation_reason_codes = []
 
         for currency, val in cash_balances.items():
             if currency == self.base_currency:
                 continue
             rate = get_conversion_rate_to_usdc(currency, get_mark_func)
-            if rate is not None:
+            if rate is None:
+                stale_missing_conversion_paths.append(currency)
+                valuation_reason_codes.append(f"MISSING_CONVERSION_PATH_{currency}")
+            else:
                 converted_other_cash += val * rate
 
         # Calculate position market values and unrealized PnL in base currency
@@ -240,16 +263,22 @@ class PortfolioEngine:
             p_mapping = get_product_mapping(sym)
             quote = p_mapping.canonical_symbol.split("/")[-1].upper()
 
-            # Retrieve fresh market mark; fallback safely to entry price if missing
+            # Retrieve fresh market mark
             mark_price = get_mark_func(sym)
             if mark_price is None or mark_price <= 0.0:
-                mark_price = pos["entry_price"]
+                stale_missing_marks.append(sym)
+                valuation_reason_codes.append(f"STALE_OR_MISSING_MARK_{sym}")
+                mark_price = pos["entry_price"]  # Safe fallback for exits / protective runs
 
             pos_val_quote = qty * mark_price
             rate = get_conversion_rate_to_usdc(quote, get_mark_func)
             
             pos_val_base = pos_val_quote
-            if rate is not None:
+            if rate is None:
+                stale_missing_conversion_paths.append(quote)
+                if f"MISSING_CONVERSION_PATH_{quote}" not in valuation_reason_codes:
+                    valuation_reason_codes.append(f"MISSING_CONVERSION_PATH_{quote}")
+            else:
                 pos_val_base = pos_val_quote * rate
 
             # Update position unrealized PnL in-memory
@@ -280,6 +309,8 @@ class PortfolioEngine:
         }
         state_digest = hashlib.sha256(json.dumps(digest_payload, sort_keys=True).encode("utf-8")).hexdigest()
 
+        valuation_valid = (len(stale_missing_marks) == 0 and len(stale_missing_conversion_paths) == 0)
+
         return PortfolioSnapshot(
             equity=portfolio_equity,
             cash=cash_balances,
@@ -291,7 +322,11 @@ class PortfolioEngine:
             drawdown=drawdown,
             peak_equity=peak_equity,
             version=version,
-            digest=state_digest
+            digest=state_digest,
+            valuation_valid=valuation_valid,
+            valuation_reason_codes=valuation_reason_codes,
+            stale_missing_marks=stale_missing_marks,
+            stale_missing_conversion_paths=stale_missing_conversion_paths
         )
 
     def _save_metadata(self, key: str, value: str):
@@ -412,6 +447,8 @@ class PortfolioEngine:
 
     # ────────────────────────── PortfolioAllocator Implementation ──────────────────────────
 
+    # ────────────────────────── PortfolioAllocator Implementation ──────────────────────────
+
     def allocate(
         self,
         proposal: AllocationProposal,
@@ -422,180 +459,334 @@ class PortfolioEngine:
         config_hash: str = "v1"
     ) -> AllocationResult:
         """
-        Determines the safe allocation matching limits and reservations (Requirement #3 / #5).
+        Entry point for allocation with bounded retries for serialization conflicts (Requirement D3).
+        """
+        max_retries = 10
+        backoff = 0.05
+        import time
+        for attempt in range(max_retries):
+            try:
+                return self._allocate_transactional(
+                    proposal=proposal,
+                    get_mark_func=get_mark_func,
+                    risk_settings=risk_settings,
+                    lane_settings=lane_settings,
+                    code_sha=code_sha,
+                    config_hash=config_hash
+                )
+            except (psycopg2.errors.SerializationFailure, sqlite3.OperationalError) as e:
+                if attempt == max_retries - 1:
+                    print(f"PortfolioEngine: Concurrency retry limit exceeded: {e}")
+                    raise e
+                print(f"PortfolioEngine: Concurrency conflict. Retrying in {backoff}s...")
+                time.sleep(backoff)
+                backoff *= 2.0
+
+    def _allocate_transactional(
+        self,
+        proposal: AllocationProposal,
+        get_mark_func,
+        risk_settings,
+        lane_settings,
+        code_sha: str,
+        config_hash: str = "v1"
+    ) -> AllocationResult:
+        """
+        Determines the safe allocation matching limits and reservations in a SINGLE SQL transaction (Requirement D3).
         """
         allocation_id = f"alloc-{uuid.uuid4()}"
         reason_codes = []
-        
-        # Load fresh snapshot to validate current constraints
-        snapshot = self.load_portfolio_snapshot(get_mark_func)
-        
-        # Protective exits bypass concentration, cooldown, and capital constraints
-        is_exit = proposal.action in ["REDUCE", "CLOSE"]
-        
-        if is_exit:
-            # Always approve protective exits
-            result_decision = "APPROVE"
-            return AllocationResult(
-                allocation_id=allocation_id,
-                proposal_id=proposal.proposal_id,
-                symbol=proposal.symbol,
-                decision=result_decision,
-                approved_notional=proposal.requested_notional,
-                approved_quantity=0.0, # to be calculated on execution
-                reserved_capital=0.0,
-                reason_codes=["PROTECTIVE_EXIT_BYPASS"],
-                portfolio_version=snapshot.version,
-                portfolio_digest=snapshot.digest
-            )
 
-        # New entries: check strict portfolio-level controls
-        # Fetch mapping and quote currency
-        p_mapping = get_product_mapping(proposal.symbol)
-        quote = p_mapping.canonical_symbol.split("/")[-1].upper()
-        
-        # Check conversion path freshness
-        rate = get_conversion_rate_to_usdc(quote, get_mark_func)
-        if rate is None:
-            reason_codes.append("STALE_CONVERSION_PATH")
-            return AllocationResult(
-                allocation_id=allocation_id,
-                proposal_id=proposal.proposal_id,
-                symbol=proposal.symbol,
-                decision="REJECT",
-                approved_notional=0.0,
-                approved_quantity=0.0,
-                reserved_capital=0.0,
-                reason_codes=reason_codes,
-                portfolio_version=snapshot.version,
-                portfolio_digest=snapshot.digest
-            )
+        with self._get_db_cursor_context() as cur:
+            # 1. Load fresh snapshot inside the active transaction (cur passed)
+            snapshot = self.load_portfolio_snapshot(get_mark_func, cur=cur)
 
-        # Check max drawdown budget (10% limit)
-        if snapshot.drawdown > 10.0:
-            reason_codes.append("RISK_BUDGET_EXCEEDED")
-            return AllocationResult(
-                allocation_id=allocation_id,
-                proposal_id=proposal.proposal_id,
-                symbol=proposal.symbol,
-                decision="REJECT",
-                approved_notional=0.0,
-                approved_quantity=0.0,
-                reserved_capital=0.0,
-                reason_codes=reason_codes,
-                portfolio_version=snapshot.version,
-                portfolio_digest=snapshot.digest
-            )
+            # Protective exits bypass limits
+            is_exit = proposal.action in ["REDUCE", "CLOSE"]
+            
+            if is_exit:
+                new_v = self._increment_version_tx(cur)
+                self._persist_allocation_audit_tx(
+                    cur,
+                    allocation_id=allocation_id,
+                    proposal_id=proposal.proposal_id,
+                    symbol=proposal.symbol,
+                    action=proposal.action,
+                    req_risk=proposal.requested_risk_fraction,
+                    app_risk=proposal.requested_risk_fraction,
+                    req_notional=proposal.requested_notional,
+                    app_notional=proposal.requested_notional,
+                    reserved=0.0,
+                    status="APPROVED",
+                    reason_codes=["PROTECTIVE_EXIT_BYPASS"],
+                    port_version=new_v,
+                    port_digest=snapshot.digest,
+                    marks_provenance={},
+                    config_hash=config_hash,
+                    code_sha=code_sha
+                )
+                return AllocationResult(
+                    allocation_id=allocation_id,
+                    proposal_id=proposal.proposal_id,
+                    symbol=proposal.symbol,
+                    decision="APPROVE",
+                    approved_notional=proposal.requested_notional,
+                    approved_quantity=0.0,
+                    reserved_capital=0.0,
+                    reason_codes=["PROTECTIVE_EXIT_BYPASS"],
+                    portfolio_version=new_v,
+                    portfolio_digest=snapshot.digest
+                )
 
-        # Check maximum concurrent positions limit
-        active_positions = [s for s, p in snapshot.positions.items() if p["quantity"] > 0.0]
-        if len(active_positions) >= lane_settings.max_open_positions and proposal.symbol not in active_positions:
-            reason_codes.append("MAX_POSITIONS_LIMIT_REACHED")
-            return AllocationResult(
-                allocation_id=allocation_id,
-                proposal_id=proposal.proposal_id,
-                symbol=proposal.symbol,
-                decision="REJECT",
-                approved_notional=0.0,
-                approved_quantity=0.0,
-                reserved_capital=0.0,
-                reason_codes=reason_codes,
-                portfolio_version=snapshot.version,
-                portfolio_digest=snapshot.digest
-            )
+            # 2. Check Valuation Validity (D2)
+            if not snapshot.valuation_valid:
+                reason_codes.append("PORTFOLIO_VALUATION_INVALID")
+                reason_codes.extend(snapshot.valuation_reason_codes)
+                new_v = self._increment_version_tx(cur)
+                self._persist_allocation_audit_tx(
+                    cur,
+                    allocation_id=allocation_id,
+                    proposal_id=proposal.proposal_id,
+                    symbol=proposal.symbol,
+                    action=proposal.action,
+                    req_risk=proposal.requested_risk_fraction,
+                    app_risk=0.0,
+                    req_notional=proposal.requested_notional,
+                    app_notional=0.0,
+                    reserved=0.0,
+                    status="REJECTED",
+                    reason_codes=reason_codes,
+                    port_version=new_v,
+                    port_digest=snapshot.digest,
+                    marks_provenance={},
+                    config_hash=config_hash,
+                    code_sha=code_sha
+                )
+                return AllocationResult(
+                    allocation_id=allocation_id,
+                    proposal_id=proposal.proposal_id,
+                    symbol=proposal.symbol,
+                    decision="REJECT",
+                    approved_notional=0.0,
+                    approved_quantity=0.0,
+                    reserved_capital=0.0,
+                    reason_codes=reason_codes,
+                    portfolio_version=new_v,
+                    portfolio_digest=snapshot.digest
+                )
 
-        # Limit 1: Max Position Fraction of Equity (lane setting)
-        # allowed notional in base = equity * max_position_pct / 100
-        max_notional_base = snapshot.equity * (lane_settings.max_position_pct / 100.0)
-        max_notional_quote = max_notional_base / rate
+            # 3. New entries: check strict portfolio-level controls
+            p_mapping = get_product_mapping(proposal.symbol)
+            quote = p_mapping.canonical_symbol.split("/")[-1].upper()
+            rate = get_conversion_rate_to_usdc(quote, get_mark_func)
+            price = get_mark_func(proposal.symbol)
 
-        # Limit 2: Max Gross Exposure constraint
-        max_gross_limit = 50000.0 # From global risk model
-        remaining_gross_quota_base = max(0.0, max_gross_limit - snapshot.gross_exposure)
-        remaining_gross_quota_quote = remaining_gross_quota_base / rate
-
-        # Limit 3: Max Concentration Constraint (e.g. 30% concentration of single asset)
-        max_concentration_limit_base = snapshot.equity * 0.30
-        remaining_concentration_quota_quote = max_concentration_limit_base / rate
-
-        # Combine limits to find the absolute safe maximum allowed notional in quote currency
-        safe_max_notional_quote = min(max_notional_quote, remaining_gross_quota_quote, remaining_concentration_quota_quote)
-
-        # Scale down requested notional if it violates any constraint (MODIFY_DOWN)
-        approved_notional = proposal.requested_notional
-        decision = "APPROVE"
-
-        if approved_notional > safe_max_notional_quote:
-            approved_notional = safe_max_notional_quote
-            decision = "MODIFY_DOWN"
-            reason_codes.append("CONSTRAINTS_SCALED_DOWN")
-
-        # Finally, verify available cash in the target quote currency
-        # We need available cash in quote currency to support this allocation!
-        available_quote_cash = snapshot.cash.get(quote, 0.0) - snapshot.reserved.get(quote, 0.0)
-        if approved_notional > available_quote_cash:
-            # We scale down to the available cash (MODIFY_DOWN)
-            if available_quote_cash > 0.0:
-                approved_notional = available_quote_cash
-                decision = "MODIFY_DOWN"
-                reason_codes.append("CASH_LIMIT_SCALED_DOWN")
+            # Drawdown check
+            if snapshot.drawdown > 10.0:
+                reason_codes.append("RISK_BUDGET_EXCEEDED")
+                decision = "REJECT"
+                approved_notional = 0.0
             else:
-                decision = "REJECT"
-                reason_codes.append("INSUFFICIENT_CASH")
-                approved_notional = 0.0
+                # Open positions limit
+                active_positions = [s for s, p in snapshot.positions.items() if p["quantity"] > 0.0]
+                if len(active_positions) >= lane_settings.max_open_positions and proposal.symbol not in active_positions:
+                    reason_codes.append("MAX_POSITIONS_LIMIT_REACHED")
+                    decision = "REJECT"
+                    approved_notional = 0.0
+                else:
+                    # Limits calculations
+                    max_notional_base = snapshot.equity * (lane_settings.max_position_pct / 100.0)
+                    max_notional_quote = max_notional_base / rate
 
-        # Enforce minimum trade bounds (e.g. 1.0 quote notional minimum)
-        if approved_notional < 1.0:
-            decision = "REJECT"
-            reason_codes.append("BELOW_MINIMUM_NOTIONAL")
-            approved_notional = 0.0
+                    max_gross_limit = 50000.0
+                    remaining_gross_quota_base = max(0.0, max_gross_limit - snapshot.gross_exposure)
+                    remaining_gross_quota_quote = remaining_gross_quota_base / rate
 
-        reserved_capital = approved_notional if decision != "REJECT" else 0.0
-        
-        # If approved, transactionally reserve the capital!
-        if reserved_capital > 0.0:
-            success = self.reserve_capital(allocation_id, quote, reserved_capital)
-            if not success:
-                decision = "REJECT"
-                reason_codes.append("RESERVATION_RACE_CONCURRENCY_FAIL")
-                approved_notional = 0.0
-                reserved_capital = 0.0
+                    max_concentration_limit_base = snapshot.equity * 0.30
+                    max_concentration_quota_quote = max_concentration_limit_base / rate
 
-        # Increment portfolio state version
-        new_v = self._increment_version()
+                    # D4: Add Remaining Capacity
+                    current_pos_val_quote = 0.0
+                    if proposal.symbol in snapshot.positions:
+                        pos = snapshot.positions[proposal.symbol]
+                        current_pos_val_quote = pos["quantity"] * price
 
-        # Persist audit row matching #9 and #13
-        self._persist_allocation_audit(
-            allocation_id=allocation_id,
-            proposal_id=proposal.proposal_id,
-            symbol=proposal.symbol,
-            action=proposal.action,
-            req_risk=proposal.requested_risk_fraction,
-            app_risk=proposal.requested_risk_fraction if decision == "APPROVE" else (approved_notional * rate / snapshot.equity if snapshot.equity > 0.0 else 0.0),
-            req_notional=proposal.requested_notional,
-            app_notional=approved_notional,
-            reserved=reserved_capital,
-            status="PENDING" if reserved_capital > 0.0 else "REJECTED",
-            reason_codes=reason_codes,
-            port_version=new_v,
-            port_digest=snapshot.digest,
-            marks_provenance={"quote": quote, "conversion_rate_to_usdc": rate},
-            config_hash=config_hash,
-            code_sha=code_sha
-        )
+                    if proposal.action == "ADD":
+                        remaining_position_capacity = max_notional_quote - current_pos_val_quote
+                        remaining_concentration_capacity = max_concentration_quota_quote - current_pos_val_quote
+                        safe_max_notional_quote = min(remaining_position_capacity, remaining_concentration_capacity, remaining_gross_quota_quote)
+                    else:
+                        safe_max_notional_quote = min(max_notional_quote, max_concentration_quota_quote, remaining_gross_quota_quote)
 
-        return AllocationResult(
-            allocation_id=allocation_id,
-            proposal_id=proposal.proposal_id,
-            symbol=proposal.symbol,
-            decision=decision,
-            approved_notional=approved_notional,
-            approved_quantity=0.0, # to be set on actual fill
-            reserved_capital=reserved_capital,
-            reason_codes=reason_codes,
-            portfolio_version=new_v,
-            portfolio_digest=snapshot.digest
-        )
+                    # Limit 4: D7 Requested Risk Fraction and Requested Notional constraints
+                    max_by_risk_fraction_base = snapshot.equity * proposal.requested_risk_fraction
+                    max_by_risk_fraction_quote = max_by_risk_fraction_base / rate
+
+                    # Combine all limits dynamically (D7)
+                    safe_max_notional_quote = min(safe_max_notional_quote, max_by_risk_fraction_quote)
+
+                    approved_notional = proposal.requested_notional
+                    decision = "APPROVE"
+
+                    if approved_notional > safe_max_notional_quote:
+                        approved_notional = safe_max_notional_quote
+                        decision = "MODIFY_DOWN"
+                        reason_codes.append("CONSTRAINTS_SCALED_DOWN")
+
+                    # Check cash
+                    available_quote_cash = snapshot.cash.get(quote, 0.0) - snapshot.reserved.get(quote, 0.0)
+                    if approved_notional > available_quote_cash:
+                        if available_quote_cash > 0.0:
+                            approved_notional = available_quote_cash
+                            decision = "MODIFY_DOWN"
+                            reason_codes.append("CASH_LIMIT_SCALED_DOWN")
+                        else:
+                            decision = "REJECT"
+                            reason_codes.append("INSUFFICIENT_CASH")
+                            approved_notional = 0.0
+
+                    # Min notional check
+                    if approved_notional < 1.0 and decision != "REJECT":
+                        decision = "REJECT"
+                        reason_codes.append("BELOW_MINIMUM_NOTIONAL")
+                        approved_notional = 0.0
+
+            # Calculate approved risk fraction from actual approved base notional (D7)
+            approved_base_notional = approved_notional * rate
+            approved_risk_fraction = approved_base_notional / snapshot.equity if snapshot.equity > 0.0 else 0.0
+
+            # Enforce constraints (D7)
+            if approved_notional > proposal.requested_notional:
+                approved_notional = proposal.requested_notional
+            if approved_risk_fraction > proposal.requested_risk_fraction:
+                approved_risk_fraction = proposal.requested_risk_fraction
+
+            reserved_capital = approved_notional if decision != "REJECT" else 0.0
+
+            # Transactionally reserve inside the same cur (D3)
+            if reserved_capital > 0.0:
+                if self.db.use_sqlite:
+                    row = cur.execute("SELECT cash, reserved FROM portfolio_cash WHERE currency = ?", (quote,)).fetchone()
+                    cash_val, res_val = float(row[0]), float(row[1])
+                    if cash_val - res_val >= reserved_capital:
+                        cur.execute("UPDATE portfolio_cash SET reserved = reserved + ? WHERE currency = ?", (reserved_capital, quote))
+                    else:
+                        decision = "REJECT"
+                        reason_codes.append("RESERVATION_RACE_CONCURRENCY_FAIL")
+                        approved_notional = 0.0
+                        reserved_capital = 0.0
+                        approved_risk_fraction = 0.0
+                else:
+                    cur.execute("SELECT cash, reserved FROM portfolio_cash WHERE currency = %s FOR UPDATE", (quote,))
+                    row = cur.fetchone()
+                    cash_val, res_val = float(row["cash"]), float(row["reserved"])
+                    if cash_val - res_val >= reserved_capital:
+                        cur.execute("UPDATE portfolio_cash SET reserved = reserved + %s WHERE currency = %s", (reserved_capital, quote))
+                    else:
+                        decision = "REJECT"
+                        reason_codes.append("RESERVATION_RACE_CONCURRENCY_FAIL")
+                        approved_notional = 0.0
+                        reserved_capital = 0.0
+                        approved_risk_fraction = 0.0
+
+            new_v = self._increment_version_tx(cur)
+
+            # Persist audit row inside same transaction
+            self._persist_allocation_audit_tx(
+                cur,
+                allocation_id=allocation_id,
+                proposal_id=proposal.proposal_id,
+                symbol=proposal.symbol,
+                action=proposal.action,
+                req_risk=proposal.requested_risk_fraction,
+                app_risk=approved_risk_fraction,
+                req_notional=proposal.requested_notional,
+                app_notional=approved_notional,
+                reserved=reserved_capital,
+                status="PENDING" if reserved_capital > 0.0 else "REJECTED",
+                reason_codes=reason_codes,
+                port_version=new_v,
+                port_digest=snapshot.digest,
+                marks_provenance={"quote": quote, "conversion_rate_to_usdc": rate},
+                config_hash=config_hash,
+                code_sha=code_sha
+            )
+
+            return AllocationResult(
+                allocation_id=allocation_id,
+                proposal_id=proposal.proposal_id,
+                symbol=proposal.symbol,
+                decision=decision,
+                approved_notional=approved_notional,
+                approved_quantity=0.0,
+                reserved_capital=reserved_capital,
+                reason_codes=reason_codes,
+                portfolio_version=new_v,
+                portfolio_digest=snapshot.digest
+            )
+
+    def _increment_version_tx(self, cur) -> int:
+        if self.db.use_sqlite:
+            row = cur.execute("SELECT value FROM portfolio_metadata WHERE key = 'version'").fetchone()
+            new_v = int(row[0]) + 1 if row else 1
+            cur.execute("INSERT OR REPLACE INTO portfolio_metadata (key, value) VALUES ('version', ?)", (str(new_v),))
+        else:
+            cur.execute("SELECT value FROM portfolio_metadata WHERE key = 'version' FOR UPDATE")
+            row = cur.fetchone()
+            new_v = int(row["value"]) + 1 if row else 1
+            cur.execute("""
+                INSERT INTO portfolio_metadata (key, value) 
+                VALUES ('version', %s)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """, (str(new_v),))
+        return new_v
+
+    def _persist_allocation_audit_tx(
+        self,
+        cur,
+        allocation_id: str,
+        proposal_id: str,
+        symbol: str,
+        action: str,
+        req_risk: float,
+        app_risk: float,
+        req_notional: float,
+        app_notional: float,
+        reserved: float,
+        status: str,
+        reason_codes: List[str],
+        port_version: int,
+        port_digest: str,
+        marks_provenance: dict,
+        config_hash: str,
+        code_sha: str
+    ):
+        reasons_json = json.dumps(reason_codes)
+        provenance_json = json.dumps(marks_provenance)
+        if self.db.use_sqlite:
+            cur.execute("""
+                INSERT INTO portfolio_allocations (
+                    allocation_id, proposal_id, symbol, action, requested_risk_fraction, approved_risk_fraction,
+                    requested_notional, approved_notional, reserved_capital, status, reason_codes,
+                    portfolio_version, portfolio_digest, marks_provenance, config_hash, code_sha
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                allocation_id, proposal_id, symbol, action, req_risk, app_risk,
+                req_notional, app_notional, reserved, status, reasons_json,
+                port_version, port_digest, provenance_json, config_hash, code_sha
+            ))
+        else:
+            cur.execute("""
+                INSERT INTO portfolio_allocations (
+                    allocation_id, proposal_id, symbol, action, requested_risk_fraction, approved_risk_fraction,
+                    requested_notional, approved_notional, reserved_capital, status, reason_codes,
+                    portfolio_version, portfolio_digest, marks_provenance, config_hash, code_sha
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                allocation_id, proposal_id, symbol, action, req_risk, app_risk,
+                req_notional, app_notional, reserved, status, reasons_json,
+                port_version, port_digest, provenance_json, config_hash, code_sha
+            ))
 
     def _persist_allocation_audit(
         self,
@@ -649,7 +840,7 @@ class PortfolioEngine:
     def reconcile_orphan_reservations(self):
         """
         Scans allocations in PENDING status, cross-checks active ExecutionIntents,
-        and releases any orphan reservations transactionally (Requirement #4 / #7).
+        and releases any orphan reservations transactionally (Requirement #4 / #7 / D5).
         """
         pending_allocations = []
         with self._get_db_cursor_context() as cur:
@@ -664,15 +855,15 @@ class PortfolioEngine:
                     pending_allocations.append({"id": r["allocation_id"], "symbol": r["symbol"], "amount": float(r["approved_notional"])})
 
         for alloc in pending_allocations:
-            # Check if there is a corresponding execution intent
+            # Check if there is a corresponding execution intent (Requirement D5)
             has_intent = False
             with self._get_db_cursor_context() as cur:
                 if self.db.use_sqlite:
-                    row = cur.execute("SELECT id FROM execution_intents WHERE risk_decision_id = ?", (alloc["id"],)).fetchone()
+                    row = cur.execute("SELECT id FROM execution_intents WHERE allocation_id = ?", (alloc["id"],)).fetchone()
                     if row:
                         has_intent = True
                 else:
-                    cur.execute("SELECT id FROM execution_intents WHERE risk_decision_id::text = %s", (alloc["id"],))
+                    cur.execute("SELECT id FROM execution_intents WHERE allocation_id = %s", (alloc["id"],))
                     row = cur.fetchone()
                     if row:
                         has_intent = True
