@@ -1,6 +1,11 @@
 import unittest
 import uuid
 import sqlite3
+import sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
 from datetime import datetime, UTC, timedelta
 from app.backtest import CoinbaseReplayEngine, HistoricalDataset
 from app.products import CoinbaseProduct, registry
