@@ -45,12 +45,16 @@ class HistoricalDataset:
         end_time: datetime,
         as_of: datetime,
         candles_list: List[dict],
-        code_sha: str,
+        code_sha: str | None = None,
         config_hash: str = "v1"
     ):
+        if code_sha is None:
+            code_sha = get_current_code_sha()
+
         if not code_sha or code_sha == "unknown":
             raise ValueError("Invalid code SHA for dataset provenance: cannot be empty or 'unknown'")
 
+        self.code_sha = code_sha
         self.canonical_symbols = sorted(canonical_symbols)
         self.timeframe = timeframe
         self.start_time = start_time
@@ -70,7 +74,7 @@ class HistoricalDataset:
             f"{self.as_of.isoformat()}|"
             f"v1|"  # preprocessing_version
             f"{config_hash}|"
-            f"{code_sha}"
+            f"{self.code_sha}"
         )
         self.dataset_id = f"ds-{hashlib.sha256(metadata_str.encode('utf-8')).hexdigest()[:16]}"
 
@@ -240,11 +244,11 @@ class CoinbaseReplayEngine:
         Executes a chronological, deterministic backtest replay.
         Uses isolated memory state and namespace to prevent paper-state contamination (Blocker G).
         """
-        if code_sha is None:
-            code_sha = get_current_code_sha()
+        # Determine and validate code_sha (Blocker C2 - Atomic Provenance)
+        if code_sha is not None and code_sha != dataset.code_sha:
+            raise ValueError(f"Code SHA mismatch: run_backtest received '{code_sha}' but dataset is bound to '{dataset.code_sha}'")
             
-        if not code_sha or code_sha == "unknown":
-            raise ValueError("Invalid code SHA for backtest execution: cannot be empty or 'unknown'")
+        authoritative_sha = dataset.code_sha
 
         run_id = f"run-{uuid.uuid4()}"
         print(f"Replay: Starting run {run_id} on dataset {dataset.dataset_id}")
@@ -253,7 +257,7 @@ class CoinbaseReplayEngine:
         rng = random.Random(seed)
 
         # Blocker A5: Real dataset persistence into dataset_versions table before starting!
-        self._save_dataset_version(dataset, code_sha)
+        self._save_dataset_version(dataset, authoritative_sha)
 
         # Blocker A6: PostgreSQL Lifecycle — create the replay_runs row BEFORE execution rows!
         config_hash = hashlib.sha256(f"{initial_cash}|{fee_rate}|{slippage_rate}|{seed}".encode("utf-8")).hexdigest()
@@ -261,7 +265,7 @@ class CoinbaseReplayEngine:
             run_id=run_id,
             dataset_id=dataset.dataset_id,
             config_hash=config_hash,
-            code_sha=code_sha,
+            code_sha=authoritative_sha,
             seed=seed,
             fee_rate=fee_rate,
             slippage_rate=slippage_rate,

@@ -144,6 +144,7 @@ class TestPostgresIntegration(unittest.TestCase):
         """
         C2: Load dataset and execute run using dynamic authoritative CODE_SHA,
         verifying that X is valid, non-empty, and correctly matched in all contracts.
+        Also verifies mismatch raises ValueError.
         """
         from app.backtest import get_current_code_sha
         sha_x = get_current_code_sha()
@@ -160,9 +161,10 @@ class TestPostgresIntegration(unittest.TestCase):
         
         # Load dataset with SHA X
         ds = self.replay_engine.load_dataset_from_db(["BTC/USDC"], 300, start, end, end, code_sha=sha_x)
+        self.assertEqual(ds.code_sha, sha_x)
         
-        # Run backtest with SHA X
-        result = self.replay_engine.run_backtest(ds, initial_cash=10000.0, code_sha=sha_x)
+        # Run backtest with SHA X (or None, which inherits ds.code_sha)
+        result = self.replay_engine.run_backtest(ds, initial_cash=10000.0)
         
         # Verify same dynamic SHA matches in all places:
         # 1. Dataset ID determinism
@@ -180,6 +182,11 @@ class TestPostgresIntegration(unittest.TestCase):
             cur.execute("SELECT code_sha FROM replay_runs WHERE run_id = %s", (result["run_id"],))
             rr_sha = cur.fetchone()["code_sha"]
             self.assertEqual(rr_sha, sha_x)
+            
+        # 3. Mismatch test (Atomic Provenance Check)
+        different_sha = "a" * 40
+        with self.assertRaises(ValueError):
+            self.replay_engine.run_backtest(ds, initial_cash=10000.0, code_sha=different_sha)
 
     def test_pg_05_reconstruct_reproducible_accounting_run(self):
         """
