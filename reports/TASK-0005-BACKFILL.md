@@ -19,7 +19,7 @@ Before starting the backfill, we verified the current public, unauthenticated Co
     - `86400` (1d)
 *   **Maximum records per request:** **300 candles**.
 *   **Pagination/Window Semantics:** Controlled via `start` and `end` ISO-8601 parameter bounds.
-*   **Rate-limiting:** 3 requests per second limit on unauthenticated endpoints. We enforce a conservative, safe rate-limiting delay of `0.35s` between requests.
+*   **Rate-limiting:** The official Coinbase Advanced Exchange REST limit is **10 requests/sec per IP** (burst up to 15). We enforce a conservative, safe rate-limiting delay of `0.35s` (under 3 req/s) between requests to ensure absolute reliability and prevent IP blocks.
 *   **Caveat handling:** If Coinbase has missing intervals, it returns an empty subset or skips those candles. The system explicitly detects and records these as `EXPLICIT_UNAVAILABLE`.
 
 ---

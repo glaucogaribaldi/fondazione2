@@ -308,36 +308,48 @@ class CoinbaseBackfillEngine:
 
         resolved_count = 0
         for chunk in gap_chunks:
-            chunk_start = chunk[0]
-            chunk_end = chunk[-1] + timedelta(seconds=granularity)
+            remaining_missing = list(chunk)
+            attempts_count = {g_ts: 0 for g_ts in chunk}
             
-            print(f"Data Quality: Running targeted refetch for gap window {chunk_start.isoformat()} to {chunk_end.isoformat()}...")
-            
-            # Try to fetch and ingest raw candles up to 3 times (bounded retry)
-            for attempt in range(1, 4):
+            while remaining_missing:
+                chunk_start = min(remaining_missing)
+                chunk_end = max(remaining_missing) + timedelta(seconds=granularity)
+                
+                print(f"Data Quality: Fetching sub-window {chunk_start.isoformat()} to {chunk_end.isoformat()} for remaining {len(remaining_missing)} gaps...")
+                
+                # Try to fetch and ingest raw candles
                 try:
-                    # Increment gap attempts in DB for the whole chunk
-                    for g_ts in chunk:
-                        self._increment_single_gap_attempts(p.product_id, granularity, g_ts)
-                        
                     raw_candles = await self._fetch_coinbase_candles_raw(p.market_data_product_id, chunk_start, chunk_end, granularity)
                     if raw_candles:
                         self._ingest_and_validate_candles(p, granularity, raw_candles)
-                        break
                 except Exception as e:
-                    print(f"Data Quality: Refetch attempt {attempt}/3 failed: {e}")
-                await asyncio.sleep(self.rate_limit_delay)
+                    print(f"Data Quality: Refetch attempt failed: {e}")
                 
-            # Riverify each individual timestamp after the refetch attempts
-            present_timestamps = set(self._get_candle_timestamps(p.product_id, granularity, chunk_start, chunk_end))
-            
-            for g_ts in chunk:
-                if g_ts in present_timestamps:
-                    self._update_single_gap_status(p.product_id, granularity, g_ts, "RESOLVED")
-                    resolved_count += 1
-                else:
-                    # Since we retried and it's still missing, we must mark it as EXPLICIT_UNAVAILABLE. No DETECTED left silent!
-                    self._update_single_gap_status(p.product_id, granularity, g_ts, "EXPLICIT_UNAVAILABLE")
+                # Revalidate against database
+                present_timestamps = set(self._get_candle_timestamps(p.product_id, granularity, chunk_start, chunk_end))
+                
+                newly_resolved = []
+                for g_ts in list(remaining_missing):
+                    if g_ts in present_timestamps:
+                        self._update_single_gap_status(p.product_id, granularity, g_ts, "RESOLVED")
+                        resolved_count += 1
+                        newly_resolved.append(g_ts)
+                    else:
+                        # Increment attempts
+                        self._increment_single_gap_attempts(p.product_id, granularity, g_ts)
+                        attempts_count[g_ts] += 1
+                        
+                        # Get cumulative attempts
+                        db_attempts = self._get_gap_attempts(p.product_id, granularity, g_ts)
+                        if attempts_count[g_ts] >= 3 or db_attempts >= 3:
+                            self._update_single_gap_status(p.product_id, granularity, g_ts, "EXPLICIT_UNAVAILABLE")
+                            newly_resolved.append(g_ts) # Remove from remaining_missing as it's terminal!
+                            
+                for g_ts in newly_resolved:
+                    remaining_missing.remove(g_ts)
+                    
+                if remaining_missing:
+                    await asyncio.sleep(self.rate_limit_delay)
 
         print(f"Data Quality: Gap recovery completed. Resolved {resolved_count}/{len(gaps_detected)} gaps.")
         return resolved_count

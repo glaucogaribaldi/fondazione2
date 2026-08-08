@@ -15,17 +15,26 @@ from .config import load_risk_settings, load_lane_settings
 
 def get_current_code_sha() -> str:
     import subprocess
+    # 1. Environment variable CODE_SHA
+    sha = os.environ.get("CODE_SHA")
+    if sha:
+        return sha.strip()
+        
+    # 2. Local git repository
     try:
-        if os.environ.get("CODE_SHA"):
-            return os.environ.get("CODE_SHA")
         root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-        return subprocess.check_output(["git", "-C", root_dir, "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode("utf-8").strip()
+        sha = subprocess.check_output(["git", "-C", root_dir, "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode("utf-8").strip()
+        if sha:
+            return sha
     except Exception:
-        return "5987ba424f61edb2752a4e85046213693414c9e7"
+        pass
+        
+    # 3. Fail if undetermined (Blocker C2)
+    raise ValueError("Code SHA provenance could not be determined. A valid CODE_SHA env var or git repository is required.")
 
 class HistoricalDataset:
     """
-    Immutable Dataset Contract (Blocker F / B4).
+    Immutable Dataset Contract (Blocker F / B4 / C2).
     Guarantees strict no-lookahead by filtering observations >= T (Replay Clock time).
     """
     def __init__(
@@ -36,9 +45,12 @@ class HistoricalDataset:
         end_time: datetime,
         as_of: datetime,
         candles_list: List[dict],
-        code_sha: str = "unknown",
+        code_sha: str,
         config_hash: str = "v1"
     ):
+        if not code_sha or code_sha == "unknown":
+            raise ValueError("Invalid code SHA for dataset provenance: cannot be empty or 'unknown'")
+
         self.canonical_symbols = sorted(canonical_symbols)
         self.timeframe = timeframe
         self.start_time = start_time
@@ -222,12 +234,18 @@ class CoinbaseReplayEngine:
         fee_rate: float = 0.0060,
         slippage_rate: float = 0.0005,
         seed: int = 42,
-        code_sha: str = "unknown"
+        code_sha: str | None = None
     ) -> dict:
         """
         Executes a chronological, deterministic backtest replay.
         Uses isolated memory state and namespace to prevent paper-state contamination (Blocker G).
         """
+        if code_sha is None:
+            code_sha = get_current_code_sha()
+            
+        if not code_sha or code_sha == "unknown":
+            raise ValueError("Invalid code SHA for backtest execution: cannot be empty or 'unknown'")
+
         run_id = f"run-{uuid.uuid4()}"
         print(f"Replay: Starting run {run_id} on dataset {dataset.dataset_id}")
 

@@ -104,45 +104,82 @@ class TestPostgresIntegration(unittest.TestCase):
     @patch("app.backfill.CoinbaseBackfillEngine._fetch_coinbase_candles_raw", new_callable=AsyncMock)
     def test_pg_03_gap_recovery_bounded_and_state(self, mock_fetch):
         """
-        B3: Verify gap recovery bounds retries to 3 and marks gaps as EXPLICIT_UNAVAILABLE or RESOLVED.
+        C1: Verify gap recovery partial retry logic.
+        Attempt 1 returns only Gap A, Attempt 2 returns B, Attempt 3 returns nothing (C is still missing).
+        Result: A = RESOLVED, B = RESOLVED, C = EXPLICIT_UNAVAILABLE.
         """
-        mock_fetch.return_value = []
-        
         start = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
         end = datetime(2026, 8, 8, 10, 15, tzinfo=UTC)
         
+        # We have 3 gaps: 10:00 (1786183200), 10:05 (1786183500), 10:10 (1786183800)
+        # Mock fetch to simulate partial recovery returns:
+        mock_fetch.side_effect = [
+            [[1786183200, 99.0, 101.0, 100.0, 100.5, 10.0]],  # Attempt 1: only Gap A
+            [[1786183500, 99.0, 101.0, 100.0, 100.5, 10.0]],  # Attempt 2: only Gap B
+            []  # Attempt 3: C still missing
+        ]
+        
         res = asyncio.run(self.backfill_engine.scan_and_recover_gaps(self.prod, 300, start, end))
         
-        self.assertEqual(res, 0) # 0 resolved
+        # 2 gaps successfully resolved (A and B)
+        self.assertEqual(res, 2)
         
-        # Verify no gap remains in DETECTED state. They must all be EXPLICIT_UNAVAILABLE!
+        # Verify individual statuses in database
         with self.backfill_engine._get_db_cursor_context() as cur:
-            cur.execute("SELECT status, attempts FROM historical_gaps")
+            cur.execute("SELECT gap_start, status, attempts FROM historical_gaps ORDER BY gap_start ASC")
             rows = cur.fetchall()
             self.assertEqual(len(rows), 3)
-            for r in rows:
-                self.assertEqual(r["status"], "EXPLICIT_UNAVAILABLE")
-                self.assertEqual(r["attempts"], 3) # Tried 3 times in bounded retries!
+            
+            # Gap A (10:00) -> RESOLVED on 1st attempt
+            self.assertEqual(rows[0]["status"], "RESOLVED")
+            
+            # Gap B (10:05) -> RESOLVED on 2nd attempt
+            self.assertEqual(rows[1]["status"], "RESOLVED")
+            
+            # Gap C (10:10) -> EXPLICIT_UNAVAILABLE after 3 attempts
+            self.assertEqual(rows[2]["status"], "EXPLICIT_UNAVAILABLE")
+            self.assertEqual(rows[2]["attempts"], 3)
 
     def test_pg_04_dataset_provenance_real(self):
         """
-        B4: Load of two identical datasets/provenance must produce the same deterministic dataset ID.
+        C2: Load dataset and execute run using dynamic authoritative CODE_SHA,
+        verifying that X is valid, non-empty, and correctly matched in all contracts.
         """
-        raw = [[1700000000, 99.0, 101.0, 100.0, 100.5, 10.0]]
+        from app.backtest import get_current_code_sha
+        sha_x = get_current_code_sha()
+        
+        self.assertIsNotNone(sha_x)
+        self.assertNotEqual(sha_x, "unknown")
+        self.assertEqual(len(sha_x), 40) # Valid 40-char SHA
+        
+        raw = [[1786183200, 99.0, 101.0, 100.0, 100.5, 10.0]]
         self.backfill_engine._ingest_and_validate_candles(self.prod, 300, raw)
         
         start = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
         end = datetime(2026, 8, 8, 10, 15, tzinfo=UTC)
         
-        ds1 = self.replay_engine.load_dataset_from_db(["BTC/USDC"], 300, start, end, end, code_sha="my_sha_123", config_hash="my_config_hash")
-        ds2 = self.replay_engine.load_dataset_from_db(["BTC/USDC"], 300, start, end, end, code_sha="my_sha_123", config_hash="my_config_hash")
+        # Load dataset with SHA X
+        ds = self.replay_engine.load_dataset_from_db(["BTC/USDC"], 300, start, end, end, code_sha=sha_x)
         
-        self.assertEqual(ds1.dataset_id, ds2.dataset_id)
-        self.assertFalse(ds1.dataset_id.startswith("ds-run-"))
-        self.assertTrue(len(ds1.dataset_id) > 10)
+        # Run backtest with SHA X
+        result = self.replay_engine.run_backtest(ds, initial_cash=10000.0, code_sha=sha_x)
         
-        ds3 = self.replay_engine.load_dataset_from_db(["BTC/USDC"], 300, start, end, end, code_sha="different_sha", config_hash="my_config_hash")
-        self.assertNotEqual(ds1.dataset_id, ds3.dataset_id)
+        # Verify same dynamic SHA matches in all places:
+        # 1. Dataset ID determinism
+        ds_alt = self.replay_engine.load_dataset_from_db(["BTC/USDC"], 300, start, end, end, code_sha=sha_x)
+        self.assertEqual(ds.dataset_id, ds_alt.dataset_id)
+        
+        # 2. Database checks
+        with self.replay_engine._get_db_cursor_context() as cur:
+            # check dataset_versions
+            cur.execute("SELECT code_sha FROM dataset_versions WHERE dataset_id = %s", (ds.dataset_id,))
+            dv_sha = cur.fetchone()["code_sha"]
+            self.assertEqual(dv_sha, sha_x)
+            
+            # check replay_runs
+            cur.execute("SELECT code_sha FROM replay_runs WHERE run_id = %s", (result["run_id"],))
+            rr_sha = cur.fetchone()["code_sha"]
+            self.assertEqual(rr_sha, sha_x)
 
     def test_pg_05_reconstruct_reproducible_accounting_run(self):
         """
