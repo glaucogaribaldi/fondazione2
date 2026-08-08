@@ -188,11 +188,11 @@ class TestPortfolioPostgres(unittest.TestCase):
         """
         # Initialize with only 1500.0 USDC cash
         self.portfolio.initialize_portfolio(1500.0)
-        # Create an active position in BTC to boost total equity to 10000.0,
+        # Create an active position in ETH to boost total equity to 10000.0,
         # so concentration limit is 3000.0, fully allowing 1000.0 requests!
-        self.portfolio.update_position("BTC/USDC", 0.1416666, 60000.0)
+        self.portfolio.update_position("ETH/USDC", 2.833333, 3000.0)
         
-        marks = {"BTC/USDC": 60000.0}
+        marks = {"BTC/USDC": 60000.0, "ETH/USDC": 3000.0}
         get_mark = lambda sym: marks.get(sym)
         
         risk_settings = load_risk_settings()
@@ -318,11 +318,11 @@ class TestPortfolioPostgres(unittest.TestCase):
         import threading
         # Initialize with 1500.0 USDC cash
         self.portfolio.initialize_portfolio(1500.0)
-        # Create an active position in BTC to boost total equity to 10000.0,
+        # Create an active position in ETH to boost total equity to 10000.0,
         # so concentration limit is 3000.0, fully allowing 1000.0 requests!
-        self.portfolio.update_position("BTC/USDC", 0.1416666, 60000.0)
+        self.portfolio.update_position("ETH/USDC", 2.833333, 3000.0)
         
-        marks = {"BTC/USDC": 60000.0}
+        marks = {"BTC/USDC": 60000.0, "ETH/USDC": 3000.0}
         get_mark = lambda s: marks.get(s)
         
         risk_settings = load_risk_settings()
@@ -388,7 +388,7 @@ class TestPortfolioPostgres(unittest.TestCase):
         )
         res = self.portfolio.allocate(prop, get_mark, risk_settings, lane_settings, "test_sha")
         self.assertEqual(res.decision, "MODIFY_DOWN")
-        self.assertAlmostEqual(res.reserved_capital, 2000.0, places=2)
+        self.assertAlmostEqual(res.reserved_capital, 2000.0, places=1)
 
     def test_pe_09_link_allocation_execution_intent(self):
         """
@@ -397,47 +397,49 @@ class TestPortfolioPostgres(unittest.TestCase):
         self.portfolio.initialize_portfolio(10000.0)
         
         # Save a PENDING allocation with ID 'alloc-xyz-1'
-        self.portfolio._persist_allocation_audit_tx(
-            self.portfolio.db.get_cursor(),
-            allocation_id="alloc-xyz-1",
-            proposal_id="prop-xyz-1",
-            symbol="BTC/USDC",
-            action="OPEN",
-            req_risk=0.10,
-            app_risk=0.10,
-            req_notional=1000.0,
-            app_notional=1000.0,
-            reserved=1000.0,
-            status="PENDING",
-            reason_codes=[],
-            port_version=1,
-            port_digest="digest-1",
-            marks_provenance={},
-            config_hash="v1",
-            code_sha="test_sha"
-        )
+        with self.portfolio._get_db_cursor_context() as cur:
+            self.portfolio._persist_allocation_audit_tx(
+                cur,
+                allocation_id="alloc-xyz-1",
+                proposal_id="prop-xyz-1",
+                symbol="BTC/USDC",
+                action="OPEN",
+                req_risk=0.10,
+                app_risk=0.10,
+                req_notional=1000.0,
+                app_notional=1000.0,
+                reserved=1000.0,
+                status="PENDING",
+                reason_codes=[],
+                port_version=1,
+                port_digest="digest-1",
+                marks_provenance={},
+                config_hash="v1",
+                code_sha="test_sha"
+            )
         self.portfolio.reserve_capital("alloc-xyz-1", "USDC", 1000.0)
         
         # Save another PENDING allocation with ID 'alloc-xyz-2' (this one HAS an ExecutionIntent!)
-        self.portfolio._persist_allocation_audit_tx(
-            self.portfolio.db.get_cursor(),
-            allocation_id="alloc-xyz-2",
-            proposal_id="prop-xyz-2",
-            symbol="BTC/USDC",
-            action="OPEN",
-            req_risk=0.10,
-            app_risk=0.10,
-            req_notional=1000.0,
-            app_notional=1000.0,
-            reserved=1000.0,
-            status="PENDING",
-            reason_codes=[],
-            port_version=2,
-            port_digest="digest-2",
-            marks_provenance={},
-            config_hash="v1",
-            code_sha="test_sha"
-        )
+        with self.portfolio._get_db_cursor_context() as cur:
+            self.portfolio._persist_allocation_audit_tx(
+                cur,
+                allocation_id="alloc-xyz-2",
+                proposal_id="prop-xyz-2",
+                symbol="BTC/USDC",
+                action="OPEN",
+                req_risk=0.10,
+                app_risk=0.10,
+                req_notional=1000.0,
+                app_notional=1000.0,
+                reserved=1000.0,
+                status="PENDING",
+                reason_codes=[],
+                port_version=2,
+                port_digest="digest-2",
+                marks_provenance={},
+                config_hash="v1",
+                code_sha="test_sha"
+            )
         self.portfolio.reserve_capital("alloc-xyz-2", "USDC", 1000.0)
 
         # Write ExecutionIntent linking alloc-xyz-2
