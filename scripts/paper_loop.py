@@ -28,7 +28,7 @@ async def run_one_cycle(
     decision_service_url: str = "http://localhost:8080"
 ) -> bool:
     """
-    Blocker L4: Exposes a standalone, testable single-cycle function.
+    Blocker L4, M1 & M2: Exposes a standalone, testable single-cycle function.
     Executes checks, fetches market data, posts to decision-service,
     and finalizes the causal audit chain.
     """
@@ -37,7 +37,7 @@ async def run_one_cycle(
         "Content-Type": "application/json"
     }
 
-    # 1. Check stop-loss/take-profit of any active positions first (Blocker G1/H2)
+    # 1. Check stop-loss/take-profit of any active positions first (Blocker G1/H2 / M2)
     print("Checking active position stops...")
     pos = executor.get_position(lane_id, symbol)
     if pos and pos["quantity"] > 0:
@@ -50,30 +50,56 @@ async def run_one_cycle(
         if trigger_res:
             print(f"PROTECTIVE EXIT TRIGGERED: {trigger_res.status} with reason: {trigger_res.reason_codes}")
             
-            # Update metric in decision service via finalization if possible
-            try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    url = f"{decision_service_url}/v1/decision/finalize"
-                    intent_dict = {
-                        "execution_intent_id": trigger_res.execution_intent_id,
-                        "symbol": symbol,
-                        "action": "CLOSE",
-                        "side": "SELL",
-                        "quantity": float(pos["quantity"])
-                    }
-                    result_dict = {
-                        "execution_intent_id": trigger_res.execution_intent_id,
-                        "status": "FILLED",
-                        "average_fill_price": float(trigger_res.average_fill_price),
-                        "reason_codes": list(trigger_res.reason_codes)
-                    }
-                    await client.post(url, json={
-                        "request_id": str(uuid.uuid4()), # protective exit is post-hoc
-                        "execution_intent": intent_dict,
-                        "execution_result": result_dict
-                    }, headers=headers)
-            except Exception as e:
-                print(f"Failed to post metric for protective exit: {e}")
+            # Blocker M2: Call the new real, correlated protective_exit endpoint
+            req_id = str(uuid.uuid4())
+            intent_dict = {
+                "execution_intent_id": trigger_res.execution_intent_id,
+                "risk_decision_id": req_id,
+                "mode": "paper",
+                "symbol": symbol,
+                "action": "CLOSE",
+                "side": "SELL",
+                "quantity": float(pos["quantity"]),
+                "client_order_id": f"stop-exit-{trigger_res.execution_intent_id}",
+                "created_at": datetime.now(UTC).isoformat(),
+                "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+            }
+            result_dict = {
+                "execution_intent_id": trigger_res.execution_intent_id,
+                "broker_order_id": f"broker-{trigger_res.execution_intent_id}",
+                "status": "FILLED",
+                "requested_quantity": float(pos["quantity"]),
+                "filled_quantity": float(pos["quantity"]),
+                "average_fill_price": float(trigger_res.average_fill_price),
+                "fee": float(trigger_res.fee),
+                "slippage": float(trigger_res.slippage),
+                "reason_codes": list(trigger_res.reason_codes)
+            }
+            
+            bal = executor.get_balance(lane_id)
+            portfolio_snap = PortfolioSnapshot(
+                equity=bal["equity"],
+                cash=bal["cash"],
+                daily_pnl_pct=0.0,
+                open_positions=0,
+                current_position_pct=0.0
+            )
+            
+            print("Posting protective exit audit and fills to decision-service...")
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                url = f"{decision_service_url}/v1/decision/protective_exit"
+                response = await client.post(url, json={
+                    "request_id": req_id,
+                    "lane_id": lane_id,
+                    "symbol": symbol,
+                    "reason": list(trigger_res.reason_codes)[0] if trigger_res.reason_codes else "STOP_LOSS_TRIGGERED",
+                    "execution_intent": intent_dict,
+                    "execution_result": result_dict,
+                    "portfolio": portfolio_snap.model_dump(mode="json")
+                }, headers=headers)
+                response.raise_for_status()
+                res_data = response.json()
+                print(f"Protective exit audit successfully saved. Stable SHA-256 Digest: {res_data.get('payload_hash')}")
             return True
     else:
         print("No active position or position quantity is zero.")
@@ -90,12 +116,11 @@ async def run_one_cycle(
     
     if not ticker["is_fresh"]:
         print(f"Warning: Market data is stale! Age is {ticker['freshness_seconds']}s. Failing closed.")
-        # Trigger an API call with stale data so risk engine processes and audits it (L4)
-        pass
+        return False
 
+    # Blocker M1: Strictly fail-closed on candle fetch failure. Zero synthetic fallback.
     try:
         raw_candles = await adapter.get_candles(symbol, granularity=60, proxy_to_usd=True)
-        # Sort by timestamp ascending for correctness
         sorted_candles = sorted(raw_candles, key=lambda x: x[0])
         candles = []
         for c in sorted_candles[-32:]: # Take last 32 candles as required by MarketSnapshot
@@ -108,11 +133,8 @@ async def run_one_cycle(
                 volume=float(c[5])
             ))
     except Exception as e:
-        print(f"Failed to fetch candles: {e}. Generating flat candles for fallback.")
-        candles = [Candle(
-            timestamp=datetime.now(UTC) - timedelta(minutes=i),
-            open=ticker["price"], high=ticker["price"], low=ticker["price"], close=ticker["price"], volume=1.0
-        ) for i in range(32)]
+        print(f"CRITICAL ERROR: Failed to fetch candles from Coinbase: {e}. Failing closed.")
+        return False
 
     # 3. Construct Market & Portfolio Snapshots
     market_snap = MarketSnapshot(

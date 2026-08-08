@@ -163,8 +163,8 @@ class PaperLoopTests(unittest.TestCase):
         loop.close()
 
         # It completes successfully but decision is NO_TRADE (fails-closed)
-        self.assertTrue(res)
-        self.assertEqual(mock_post.call_count, 2)
+        self.assertFalse(res)
+        self.assertEqual(mock_post.call_count, 0)
 
     @patch("httpx.AsyncClient.post")
     def test_loop_audit_database_failure_fails_closed(self, mock_post):

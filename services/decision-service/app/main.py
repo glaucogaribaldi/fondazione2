@@ -13,7 +13,7 @@ import psycopg2
 
 from .clients import get_ai_proposal, get_forecast, quant_proposal
 from .config import load_lane_settings, load_risk_settings
-from .models import DecisionRequest, DecisionResponse, Proposal
+from .models import DecisionRequest, DecisionResponse, Proposal, PortfolioSnapshot
 from .risk import evaluate_risk
 
 
@@ -23,7 +23,7 @@ app.mount("/metrics", make_asgi_app())
 DECISIONS = Counter("foundation_decisions_total", "Decisions", ["lane", "action", "approved"])
 REASONS = Counter("foundation_decision_reasons_total", "Decision reasons", ["lane", "reason"])
 
-# Blocker K5 & L3: Comprehensive Observability Metrics
+# Blocker K5, L3 & M3: Comprehensive Observability Metrics
 MODEL_FAILURES = Counter("foundation_model_failures_total", "Model failures", ["lane", "model", "error_type"])
 DECISION_LATENCY = Gauge("foundation_decision_latency_seconds", "Decision latency", ["lane"])
 STALE_DATA = Counter("foundation_stale_data_total", "Stale market data events", ["lane"])
@@ -32,7 +32,11 @@ FILLS = Counter("foundation_fills_total", "Executed fills", ["lane", "symbol", "
 EQUITY = Gauge("foundation_equity", "Portfolio equity", ["lane"])
 DRAWDOWN = Gauge("foundation_drawdown", "Portfolio drawdown", ["lane"])
 
-# Blocker L3: Reachability metric
+# Blocker M3: Realized and Unrealized PnL
+REALIZED_PNL = Gauge("foundation_realized_pnl", "Portfolio realized PnL", ["lane"])
+UNREALIZED_PNL = Gauge("foundation_unrealized_pnl", "Portfolio unrealized PnL", ["lane"])
+
+# Blocker L3 & M3: Reachability metric
 COMPONENT_REACHABLE = Gauge("foundation_component_reachable", "Component reachability status (1=up, 0=down)", ["component"])
 
 
@@ -40,6 +44,16 @@ class FinalizeAuditRequest(BaseModel):
     request_id: str
     execution_intent: Optional[Dict[str, Any]] = None
     execution_result: Optional[Dict[str, Any]] = None
+
+
+class ProtectiveExitRequest(BaseModel):
+    request_id: str
+    lane_id: str
+    symbol: str
+    reason: str # STOP_LOSS_TRIGGERED or TAKE_PROFIT_TRIGGERED
+    execution_intent: Dict[str, Any]
+    execution_result: Dict[str, Any]
+    portfolio: PortfolioSnapshot
 
 
 def authorize(x_api_key: Annotated[str, Header()] = "") -> None:
@@ -50,10 +64,27 @@ def authorize(x_api_key: Annotated[str, Header()] = "") -> None:
 
 @app.get("/healthz")
 async def healthz() -> dict:
-    # Set default component reachability on health check
-    COMPONENT_REACHABLE.labels("postgres").set(1.0)
+    # Blocker M3: Real PostgreSQL probe query
+    db_url = os.getenv("DATABASE_URL")
+    postgres_ok = False
+    if db_url and not db_url.startswith("sqlite"):
+        try:
+            conn = psycopg2.connect(db_url, connect_timeout=3)
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+            conn.close()
+            postgres_ok = True
+        except Exception:
+            postgres_ok = False
+    else:
+        postgres_ok = True # SQLite fallback
+        
+    COMPONENT_REACHABLE.labels("postgres").set(1.0 if postgres_ok else 0.0)
+    
     return {
-        "status": "ok",
+        "status": "ok" if postgres_ok else "degraded",
+        "postgres": "up" if postgres_ok else "down",
         "trading_mode": os.getenv("TRADING_MODE", "paper"),
         "live_enabled": os.getenv("LIVE_ENABLED", "false").lower() == "true",
         "live_armed": os.getenv("LIVE_ARMED", "false").lower() == "true",
@@ -67,10 +98,6 @@ async def decide(request: DecisionRequest) -> DecisionResponse:
         
     start_time = time.time()
     lane_id = request.lane_id
-    
-    # Initialize reachability
-    COMPONENT_REACHABLE.labels("kronos").set(1.0)
-    COMPONENT_REACHABLE.labels("nemotron").set(1.0)
     
     try:
         lane, lane_settings = load_lane_settings(lane_id)
@@ -91,10 +118,13 @@ async def decide(request: DecisionRequest) -> DecisionResponse:
                 if lane["ai_enabled"]
                 else quant_proposal(forecast)
             )
-            COMPONENT_REACHABLE.labels("nemotron").set(1.0)
+            # Only mark Nemotron reachable if AI actually invoked SGLang (M3)
+            if lane["ai_enabled"]:
+                COMPONENT_REACHABLE.labels("nemotron").set(1.0)
         except Exception as exc:
             MODEL_FAILURES.labels(lane_id, "nemotron", type(exc).__name__).inc()
-            COMPONENT_REACHABLE.labels("nemotron").set(0.0)
+            if lane["ai_enabled"]:
+                COMPONENT_REACHABLE.labels("nemotron").set(0.0)
             raise exc
 
         model_versions = {
@@ -178,9 +208,13 @@ async def decide(request: DecisionRequest) -> DecisionResponse:
     DECISION_LATENCY.labels(request.lane_id).set(latency)
     EQUITY.labels(request.lane_id).set(request.portfolio.equity)
     
-    # L3: Correct drawdown formula: peak-to-trough. If daily_pnl_pct is negative, the drawdown is its absolute value.
-    drawdown = abs(request.portfolio.daily_pnl_pct) if request.portfolio.daily_pnl_pct < 0.0 else 0.0
+    # M3: Correct drawdown formula: peak-to-trough
+    peak_equity = _get_peak_equity(request.lane_id, request.portfolio.equity)
+    drawdown = ((peak_equity - request.portfolio.equity) / peak_equity) * 100.0 if peak_equity > 0 else 0.0
     DRAWDOWN.labels(request.lane_id).set(drawdown)
+
+    # M3: Update realized/unrealized PnL metrics
+    _update_pnl_metrics(request.lane_id)
 
     return response
 
@@ -235,6 +269,138 @@ async def finalize_decision_audit(request: FinalizeAuditRequest):
             status_code=500,
             detail=f"CRITICAL SAFETY ABORT: Failed to finalize causal audit update: {e}"
         )
+
+
+@app.post("/v1/decision/protective_exit", dependencies=[Depends(authorize)])
+async def record_protective_exit(request: ProtectiveExitRequest):
+    """
+    Blocker M2: Real, correlated protective exit audit insertion.
+    Inserts a brand new row in decision_audit for protective stop crosses,
+    calculates stable SHA-256 and updates Prometheus fills counter.
+    """
+    proposal_dict = {
+        "action": "CLOSE",
+        "allocation_pct": 100.0,
+        "confidence": 1.0,
+        "reason_codes": [request.reason],
+        "stop_loss_pct": None,
+        "take_profit_pct": None
+    }
+    response_dict = {
+        "request_id": request.request_id,
+        "lane_id": request.lane_id,
+        "symbol": request.symbol,
+        "decision": "CLOSE",
+        "allocation_pct": 100.0,
+        "confidence": 1.0,
+        "stop_loss_pct": None,
+        "take_profit_pct": None,
+        "valid_until": datetime.now(UTC).isoformat(),
+        "approved_by_risk_engine": True,
+        "reason_codes": [request.reason],
+        "model_versions": {"forecast": "n/a", "decision": "protective-exit"}
+    }
+    
+    payload = {
+        "request": {
+            "request_id": request.request_id,
+            "lane_id": request.lane_id,
+            "symbol": request.symbol,
+            "portfolio": request.portfolio.model_dump(mode="json")
+        },
+        "forecast": None,
+        "proposal": proposal_dict,
+        "response": response_dict,
+        "execution_intent": request.execution_intent,
+        "execution_result": request.execution_result
+    }
+    
+    payload_json = json.dumps(payload, sort_keys=True)
+    payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    
+    db_url = os.getenv("DATABASE_URL")
+    if db_url and not db_url.startswith("sqlite"):
+        try:
+            conn = psycopg2.connect(db_url)
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO decision_audit (request_id, lane_id, symbol, proposed_action, final_action, approved, reason_codes, model_versions, payload_hash, payload) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        (
+                            request.request_id,
+                            request.lane_id,
+                            request.symbol,
+                            "CLOSE",
+                            "CLOSE",
+                            True,
+                            json.dumps([request.reason]),
+                            json.dumps({"forecast": "n/a", "decision": "protective-exit"}),
+                            payload_hash,
+                            payload_json
+                        )
+                    )
+            conn.close()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"CRITICAL SAFETY ABORT: Failed to persist protective exit audit: {e}")
+            
+    # Update Prometheus metrics
+    FILLS.labels(request.lane_id, request.symbol, "SELL").inc()
+    EQUITY.labels(request.lane_id).set(request.portfolio.equity)
+    
+    # Correct peak-to-trough drawdown calculation (M3)
+    peak_equity = _get_peak_equity(request.lane_id, request.portfolio.equity)
+    drawdown = ((peak_equity - request.portfolio.equity) / peak_equity) * 100.0 if peak_equity > 0 else 0.0
+    DRAWDOWN.labels(request.lane_id).set(drawdown)
+    
+    _update_pnl_metrics(request.lane_id)
+    
+    return {"status": "ok", "payload_hash": payload_hash}
+
+
+def _get_peak_equity(lane_id: str, current_equity: float) -> float:
+    """
+    Blocker M3: Calculates peak-to-trough peak equity by querying maximum historically observed equity in DB.
+    """
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url or db_url.startswith("sqlite"):
+        return current_equity
+    try:
+        conn = psycopg2.connect(db_url)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT MAX(equity) FROM arena_snapshots WHERE lane_id = %s", (lane_id,))
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    return max(float(row[0]), current_equity)
+        conn.close()
+    except Exception:
+        pass
+    return current_equity
+
+
+def _update_pnl_metrics(lane_id: str):
+    """
+    Blocker M3: Exposes realized_pnl and unrealized_pnl metrics by querying PostgreSQL.
+    """
+    db_url = os.getenv("DATABASE_URL")
+    realized = 0.0
+    unrealized = 0.0
+    if db_url and not db_url.startswith("sqlite"):
+        try:
+            conn = psycopg2.connect(db_url)
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT realized_pnl, unrealized_pnl FROM arena_snapshots WHERE lane_id = %s ORDER BY id DESC LIMIT 1", (lane_id,))
+                    row = cur.fetchone()
+                    if row:
+                        realized = float(row[0] or 0.0)
+                        unrealized = float(row[1] or 0.0)
+            conn.close()
+        except Exception:
+            pass
+    REALIZED_PNL.labels(lane_id).set(realized)
+    UNREALIZED_PNL.labels(lane_id).set(unrealized)
 
 
 def _persist_audit(request: DecisionRequest, forecast: Any, proposal: Proposal, response: DecisionResponse, model_versions: Any):

@@ -1,12 +1,13 @@
 import httpx
 from datetime import datetime, UTC
 from typing import Any
+from .products import get_product_mapping
 
 COINBASE_EXCHANGE_URL = "https://api.exchange.coinbase.com"
 
 class CoinbasePublicAdapter:
     """
-    Coinbase Public Market Data Integration Adapter (Blocker G5).
+    Coinbase Public Market Data Integration Adapter (Blocker G5 / M5).
     Uses Coinbase Exchange API as an approved, deliberate deviation to enable 
     robust, unauthenticated public market data access without requiring private credentials.
     """
@@ -16,12 +17,12 @@ class CoinbasePublicAdapter:
 
     def map_symbol(self, symbol: str, proxy_to_usd: bool = False) -> str:
         """
-        Maps a standard symbol like BTC/USDC to Coinbase product ID like BTC-USDC or BTC-USD (if proxy_to_usd is True).
+        Maps standard symbol using the canonical ProductMapping contract (Blocker M5).
         """
-        mapped = symbol.replace("/", "-")
-        if proxy_to_usd and mapped.endswith("-USDC"):
-            mapped = mapped[:-5] + "-USD"
-        return mapped
+        mapping = get_product_mapping(symbol)
+        if proxy_to_usd and mapping.market_data_is_proxy:
+            return mapping.market_data_product_id
+        return mapping.execution_product_id
 
     async def get_product_metadata(self, symbol: str, proxy_to_usd: bool = False) -> dict[str, Any]:
         """
