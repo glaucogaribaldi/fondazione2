@@ -24,14 +24,43 @@ class CoinbaseBackfillEngine:
             class SQLiteContext:
                 def __init__(self, conn):
                     self.conn = conn
+                    self.cur = None
                 def __enter__(self):
-                    return self.conn.cursor()
+                    self.cur = self.conn.cursor()
+                    return self.cur
                 def __exit__(self, exc_type, exc_val, exc_tb):
-                    if exc_type is None:
-                        self.conn.commit()
+                    try:
+                        if exc_type is None:
+                            self.conn.commit()
+                    finally:
+                        if self.cur:
+                            self.cur.close()
             return SQLiteContext(self.db.sqlite_conn)
         else:
-            return self.db.get_cursor()
+            class PostgresContext:
+                def __init__(self, db_url):
+                    self.db_url = db_url
+                    self.conn = None
+                    self.cur = None
+                def __enter__(self):
+                    import psycopg2
+                    from psycopg2.extras import RealDictCursor
+                    self.conn = psycopg2.connect(self.db_url)
+                    self.conn.set_session(isolation_level='SERIALIZABLE', autocommit=False)
+                    self.cur = self.conn.cursor(cursor_factory=RealDictCursor)
+                    return self.cur
+                def __exit__(self, exc_type, exc_val, exc_tb):
+                    try:
+                        if exc_type is not None:
+                            self.conn.rollback()
+                        else:
+                            self.conn.commit()
+                    finally:
+                        if self.cur:
+                            self.cur.close()
+                        if self.conn:
+                            self.conn.close()
+            return PostgresContext(self.db.db_url)
 
     async def backfill_product(
         self,
@@ -283,35 +312,32 @@ class CoinbaseBackfillEngine:
             chunk_end = chunk[-1] + timedelta(seconds=granularity)
             
             print(f"Data Quality: Running targeted refetch for gap window {chunk_start.isoformat()} to {chunk_end.isoformat()}...")
-            try:
-                raw_candles = await self._fetch_coinbase_candles_raw(p.market_data_product_id, chunk_start, chunk_end, granularity)
-                if raw_candles:
-                    self._ingest_and_validate_candles(p, granularity, raw_candles)
-                
-                # Blocker A3: Riverify each individual timestamp after the refetch!
-                present_timestamps = set(self._get_candle_timestamps(p.product_id, granularity, chunk_start, chunk_end))
-                
-                for g_ts in chunk:
-                    if g_ts in present_timestamps:
-                        self._update_single_gap_status(p.product_id, granularity, g_ts, "RESOLVED")
-                        resolved_count += 1
-                    else:
-                        attempts = self._get_gap_attempts(p.product_id, granularity, g_ts)
-                        if attempts >= 3:
-                            self._update_single_gap_status(p.product_id, granularity, g_ts, "EXPLICIT_UNAVAILABLE")
-                        else:
-                            self._increment_single_gap_attempts(p.product_id, granularity, g_ts)
-                            
-                await asyncio.sleep(self.rate_limit_delay)
-            except Exception as e:
-                print(f"Data Quality: Targeted gap recovery refetch failed: {e}")
-                # Increment attempts for all in chunk
-                for g_ts in chunk:
-                    attempts = self._get_gap_attempts(p.product_id, granularity, g_ts)
-                    if attempts >= 3:
-                        self._update_single_gap_status(p.product_id, granularity, g_ts, "EXPLICIT_UNAVAILABLE")
-                    else:
+            
+            # Try to fetch and ingest raw candles up to 3 times (bounded retry)
+            for attempt in range(1, 4):
+                try:
+                    # Increment gap attempts in DB for the whole chunk
+                    for g_ts in chunk:
                         self._increment_single_gap_attempts(p.product_id, granularity, g_ts)
+                        
+                    raw_candles = await self._fetch_coinbase_candles_raw(p.market_data_product_id, chunk_start, chunk_end, granularity)
+                    if raw_candles:
+                        self._ingest_and_validate_candles(p, granularity, raw_candles)
+                        break
+                except Exception as e:
+                    print(f"Data Quality: Refetch attempt {attempt}/3 failed: {e}")
+                await asyncio.sleep(self.rate_limit_delay)
+                
+            # Riverify each individual timestamp after the refetch attempts
+            present_timestamps = set(self._get_candle_timestamps(p.product_id, granularity, chunk_start, chunk_end))
+            
+            for g_ts in chunk:
+                if g_ts in present_timestamps:
+                    self._update_single_gap_status(p.product_id, granularity, g_ts, "RESOLVED")
+                    resolved_count += 1
+                else:
+                    # Since we retried and it's still missing, we must mark it as EXPLICIT_UNAVAILABLE. No DETECTED left silent!
+                    self._update_single_gap_status(p.product_id, granularity, g_ts, "EXPLICIT_UNAVAILABLE")
 
         print(f"Data Quality: Gap recovery completed. Resolved {resolved_count}/{len(gaps_detected)} gaps.")
         return resolved_count

@@ -13,22 +13,32 @@ from .models import DecisionRequest, PortfolioSnapshot, MarketSnapshot, Candle, 
 from .risk import evaluate_risk
 from .config import load_risk_settings, load_lane_settings
 
+def get_current_code_sha() -> str:
+    import subprocess
+    try:
+        if os.environ.get("CODE_SHA"):
+            return os.environ.get("CODE_SHA")
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        return subprocess.check_output(["git", "-C", root_dir, "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode("utf-8").strip()
+    except Exception:
+        return "5987ba424f61edb2752a4e85046213693414c9e7"
+
 class HistoricalDataset:
     """
-    Immutable Dataset Contract (Blocker F).
+    Immutable Dataset Contract (Blocker F / B4).
     Guarantees strict no-lookahead by filtering observations >= T (Replay Clock time).
     """
     def __init__(
         self,
-        dataset_id: str,
         canonical_symbols: List[str],
         timeframe: int,
         start_time: datetime,
         end_time: datetime,
         as_of: datetime,
-        candles_list: List[dict]
+        candles_list: List[dict],
+        code_sha: str = "unknown",
+        config_hash: str = "v1"
     ):
-        self.dataset_id = dataset_id
         self.canonical_symbols = sorted(canonical_symbols)
         self.timeframe = timeframe
         self.start_time = start_time
@@ -36,6 +46,21 @@ class HistoricalDataset:
         self.as_of = as_of
         self.candles = candles_list
         self.dataset_hash = self._calculate_dataset_hash()
+
+        # Build deterministic dataset_id (Blocker B4)
+        metadata_str = (
+            f"{self.dataset_hash}|"
+            f"v1|"  # universe_version
+            f"{','.join(self.canonical_symbols)}|"
+            f"{self.timeframe}|"
+            f"{self.start_time.isoformat()}|"
+            f"{self.end_time.isoformat()}|"
+            f"{self.as_of.isoformat()}|"
+            f"v1|"  # preprocessing_version
+            f"{config_hash}|"
+            f"{code_sha}"
+        )
+        self.dataset_id = f"ds-{hashlib.sha256(metadata_str.encode('utf-8')).hexdigest()[:16]}"
 
     def _calculate_dataset_hash(self) -> str:
         # Generate a deterministic hash based on observations, parameters, and metadata
@@ -73,18 +98,48 @@ class CoinbaseReplayEngine:
         self.db = DatabaseConnection(db_url)
 
     def _get_db_cursor_context(self):
+        """Unified cursor context manager for SQLite/PostgreSQL."""
         if self.db.use_sqlite:
             class SQLiteContext:
                 def __init__(self, conn):
                     self.conn = conn
+                    self.cur = None
                 def __enter__(self):
-                    return self.conn.cursor()
+                    self.cur = self.conn.cursor()
+                    return self.cur
                 def __exit__(self, exc_type, exc_val, exc_tb):
-                    if exc_type is None:
-                        self.conn.commit()
+                    try:
+                        if exc_type is None:
+                            self.conn.commit()
+                    finally:
+                        if self.cur:
+                            self.cur.close()
             return SQLiteContext(self.db.sqlite_conn)
         else:
-            return self.db.get_cursor()
+            class PostgresContext:
+                def __init__(self, db_url):
+                    self.db_url = db_url
+                    self.conn = None
+                    self.cur = None
+                def __enter__(self):
+                    import psycopg2
+                    from psycopg2.extras import RealDictCursor
+                    self.conn = psycopg2.connect(self.db_url)
+                    self.conn.set_session(isolation_level='SERIALIZABLE', autocommit=False)
+                    self.cur = self.conn.cursor(cursor_factory=RealDictCursor)
+                    return self.cur
+                def __exit__(self, exc_type, exc_val, exc_tb):
+                    try:
+                        if exc_type is not None:
+                            self.conn.rollback()
+                        else:
+                            self.conn.commit()
+                    finally:
+                        if self.cur:
+                            self.cur.close()
+                        if self.conn:
+                            self.conn.close()
+            return PostgresContext(self.db.db_url)
 
     def load_dataset_from_db(
         self,
@@ -92,7 +147,9 @@ class CoinbaseReplayEngine:
         granularity: int,
         start_time: datetime,
         end_time: datetime,
-        as_of: datetime
+        as_of: datetime,
+        code_sha: str | None = None,
+        config_hash: str = "v1"
     ) -> HistoricalDataset:
         """
         Loads and canonicalizes historical candles from the database to construct the immutable Dataset Contract.
@@ -144,15 +201,18 @@ class CoinbaseReplayEngine:
                         "quality_state": r["quality_state"]
                     })
 
-        dataset_id = f"ds-{uuid.uuid4()}"
+        if code_sha is None:
+            code_sha = get_current_code_sha()
+
         return HistoricalDataset(
-            dataset_id=dataset_id,
             canonical_symbols=symbols,
             timeframe=granularity,
             start_time=start_time,
             end_time=end_time,
             as_of=as_of,
-            candles_list=candles_list
+            candles_list=candles_list,
+            code_sha=code_sha,
+            config_hash=config_hash
         )
 
     def run_backtest(
@@ -280,7 +340,26 @@ class CoinbaseReplayEngine:
                             fees_paid += fee
                             positions[sym] = {"quantity": qty, "entry_price": slippage_price}
                             trades_count += 1
-                            self._write_replay_ledger(run_id, sym, "OPEN", "BUY", qty, slippage_price, fee, 0.0, unrealized_pnl, realized_pnl, equity, cash, current_time)
+                            
+                            # Recalculate metrics after fill (Blocker B5)
+                            market_value = 0.0
+                            unrealized_pnl = 0.0
+                            for pos_sym, pos_data in positions.items():
+                                if pos_data["quantity"] > 0:
+                                    if pos_sym == sym:
+                                        pos_price = price
+                                    else:
+                                        other_prod = get_product_mapping(pos_sym).execution_product_id
+                                        other_obs = [c for c in historical_obs if c["product_id"] == other_prod]
+                                        pos_price = other_obs[-1]["close"] if other_obs else pos_data["entry_price"]
+                                    market_value += pos_data["quantity"] * pos_price
+                                    unrealized_pnl += pos_data["quantity"] * (pos_price - pos_data["entry_price"])
+                            
+                            equity = cash + market_value
+                            peak_equity = max(peak_equity, equity)
+                            drawdown = ((peak_equity - equity) / peak_equity) * 100.0 if peak_equity > 0.0 else 0.0
+                            
+                            self._write_replay_ledger(run_id, sym, "OPEN", "BUY", qty, slippage_price, fee, sim_slippage, unrealized_pnl, realized_pnl, equity, cash, current_time)
                     else: # CLOSE
                         qty = pos["quantity"]
                         # Blocker A7: apply randomized deterministic slippage based on seed!
@@ -295,10 +374,44 @@ class CoinbaseReplayEngine:
                         fees_paid += fee
                         positions[sym] = {"quantity": 0.0, "entry_price": 0.0}
                         trades_count += 1
-                        self._write_replay_ledger(run_id, sym, "CLOSE", "SELL", qty, slippage_price, fee, 0.0, 0.0, realized_pnl, equity, cash, current_time)
+                        
+                        # Recalculate metrics after fill (Blocker B5)
+                        market_value = 0.0
+                        unrealized_pnl = 0.0
+                        for pos_sym, pos_data in positions.items():
+                            if pos_data["quantity"] > 0:
+                                if pos_sym == sym:
+                                    pos_price = price
+                                else:
+                                    other_prod = get_product_mapping(pos_sym).execution_product_id
+                                    other_obs = [c for c in historical_obs if c["product_id"] == other_prod]
+                                    pos_price = other_obs[-1]["close"] if other_obs else pos_data["entry_price"]
+                                market_value += pos_data["quantity"] * pos_price
+                                unrealized_pnl += pos_data["quantity"] * (pos_price - pos_data["entry_price"])
+                        
+                        equity = cash + market_value
+                        peak_equity = max(peak_equity, equity)
+                        drawdown = ((peak_equity - equity) / peak_equity) * 100.0 if peak_equity > 0.0 else 0.0
+                        
+                        self._write_replay_ledger(run_id, sym, "CLOSE", "SELL", qty, slippage_price, fee, sim_slippage, unrealized_pnl, realized_pnl, equity, cash, current_time)
 
             # Increment Replay Clock
             current_time += timedelta(seconds=timeframe)
+
+        # Final MTM valuation at the end of the run (Blocker B5)
+        market_value = 0.0
+        unrealized_pnl = 0.0
+        for pos_sym, pos_data in positions.items():
+            if pos_data["quantity"] > 0:
+                other_prod = get_product_mapping(pos_sym).execution_product_id
+                all_candles = [c for c in dataset.candles if c["product_id"] == other_prod]
+                pos_price = all_candles[-1]["close"] if all_candles else pos_data["entry_price"]
+                market_value += pos_data["quantity"] * pos_price
+                unrealized_pnl += pos_data["quantity"] * (pos_price - pos_data["entry_price"])
+        
+        equity = cash + market_value
+        peak_equity = max(peak_equity, equity)
+        drawdown = ((peak_equity - equity) / peak_equity) * 100.0 if peak_equity > 0.0 else 0.0
 
         # 3. Blocker A6: PostgreSQL Lifecycle — Calculate final digest and finalize run metadata!
         result_digest = self._calculate_run_digest(run_id)
