@@ -14,6 +14,9 @@ sys.path.insert(0, str(ROOT / "services" / "decision-service"))
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 os.environ["DECISION_API_KEY"] = "test-secret-key"
 os.environ["TRADING_MODE"] = "paper"
+os.environ["CONFIG_DIR"] = str(ROOT / "config")
+os.environ["KRONOS_URL"] = "http://localhost:8081"
+os.environ["NEMOTRON_URL"] = "http://localhost:30000"
 
 from app.main import app
 from app.models import DecisionRequest, MarketSnapshot, PortfolioSnapshot, Candle

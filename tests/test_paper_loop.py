@@ -25,6 +25,22 @@ NOW = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
 
 class PaperLoopTests(unittest.TestCase):
 
+    def _create_mock_allocation(self, symbol, action, reserved_capital, allocation_id=None):
+        import uuid
+        alloc_id = allocation_id or str(uuid.uuid4())
+        with self.executor.portfolio_engine._get_db_cursor_context() as cur:
+            cur.execute("""
+                INSERT INTO portfolio_allocations (
+                    allocation_id, proposal_id, symbol, action, requested_risk_fraction, approved_risk_fraction,
+                    requested_notional, approved_notional, reserved_capital, status, reason_codes,
+                    portfolio_version, portfolio_digest, marks_provenance, config_hash, code_sha
+                ) VALUES (?, ?, ?, ?, 0.1, 0.1, ?, ?, ?, 'PENDING', '[]', 1, '', '{}', 'v1', 'test_sha')
+            """, (alloc_id, str(uuid.uuid4()), symbol, action, reserved_capital, reserved_capital, reserved_capital))
+            quote = symbol.split("/")[-1].upper()
+            cur.execute("INSERT OR IGNORE INTO portfolio_cash (currency, cash, reserved) VALUES (?, 10000.0, 0.0)", (quote,))
+            cur.execute("UPDATE portfolio_cash SET reserved = reserved + ? WHERE currency = ?", (reserved_capital, quote))
+        return alloc_id
+
     def setUp(self):
         # Always use clean, isolated sqlite in-memory DB for tests
         self.db_url = "sqlite:///:memory:"
@@ -86,6 +102,7 @@ class PaperLoopTests(unittest.TestCase):
         """
         # 1st call: /v1/decision -> approved OPEN
         # 2nd call: /v1/decision/finalize -> audit update
+        alloc_id = self._create_mock_allocation("BTC/USDC", "OPEN", 1000.0)
         mock_response_dec = MagicMock()
         mock_response_dec.status_code = 200
         mock_response_dec.json.return_value = {
@@ -100,7 +117,8 @@ class PaperLoopTests(unittest.TestCase):
             "valid_until": NOW.isoformat(),
             "approved_by_risk_engine": True,
             "reason_codes": ["BULLISH"],
-            "model_versions": {"forecast": "v1", "decision": "v1"}
+            "model_versions": {"forecast": "v1", "decision": "v1"},
+            "allocation_id": alloc_id
         }
 
         mock_response_fin = MagicMock()
@@ -239,6 +257,7 @@ class PaperLoopTests(unittest.TestCase):
         symbol = "BTC/USDC"
         
         # 1. Open position of 10 BTC/USDC @ $100
+        alloc_id = self._create_mock_allocation(symbol, "OPEN", 1100.0)
         intent_open = ExecutionIntent(
             execution_intent_id=str(uuid.uuid4()),
             risk_decision_id=str(uuid.uuid4()),
@@ -251,7 +270,8 @@ class PaperLoopTests(unittest.TestCase):
             take_profit_price=105.0,
             client_order_id="order-open-pnl",
             created_at=datetime.now(UTC),
-            expires_at=datetime.now(UTC) + timedelta(minutes=5)
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            allocation_id=alloc_id
         )
         res_open = self.executor.execute_intent(lane_id, intent_open, 100.0)
         self.assertEqual(res_open.status, "FILLED")
@@ -296,6 +316,7 @@ class PaperLoopTests(unittest.TestCase):
         symbol = "BTC/USDC"
         
         # 1. Open position of 10 BTC/USDC @ $100
+        alloc_id = self._create_mock_allocation(symbol, "OPEN", 1100.0)
         intent_open = ExecutionIntent(
             execution_intent_id=str(uuid.uuid4()),
             risk_decision_id=str(uuid.uuid4()),
@@ -308,7 +329,8 @@ class PaperLoopTests(unittest.TestCase):
             take_profit_price=105.0,
             client_order_id="order-open-pnl-only-mark",
             created_at=datetime.now(UTC),
-            expires_at=datetime.now(UTC) + timedelta(minutes=5)
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            allocation_id=alloc_id
         )
         res_open = self.executor.execute_intent(lane_id, intent_open, 100.0)
         self.assertEqual(res_open.status, "FILLED")
@@ -357,6 +379,7 @@ class PaperLoopTests(unittest.TestCase):
         symbol = "BTC/USDC"
 
         # 1. Open a position: 10 BTC/USDC @ $100
+        alloc_id = self._create_mock_allocation(symbol, "OPEN", 1100.0)
         intent_open = ExecutionIntent(
             execution_intent_id=str(uuid.uuid4()),
             risk_decision_id=str(uuid.uuid4()),
@@ -369,7 +392,8 @@ class PaperLoopTests(unittest.TestCase):
             take_profit_price=200.0,
             client_order_id="order-reconciliation-open",
             created_at=datetime.now(UTC),
-            expires_at=datetime.now(UTC) + timedelta(minutes=5)
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            allocation_id=alloc_id
         )
         res_open = self.executor.execute_intent(lane_id, intent_open, 100.0)
         self.assertEqual(res_open.status, "FILLED")

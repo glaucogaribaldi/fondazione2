@@ -304,7 +304,8 @@ async def run_one_cycle(
                 take_profit_price=ticker["price"] * 1.05 if dec_res.decision == "OPEN" else None, # 5% take-profit
                 client_order_id=f"order-loop-{intent_id}",
                 created_at=datetime.now(UTC),
-                expires_at=datetime.now(UTC) + timedelta(minutes=5)
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                allocation_id=dec_res.allocation_id
             )
             
             print(f"Executing ExecutionIntent: {side} {quantity} {symbol} @ {ticker['price']}")

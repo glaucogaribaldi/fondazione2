@@ -64,6 +64,34 @@ LANE = LaneSettings(
 
 class HistoricalFailuresTests(unittest.TestCase):
 
+    def _create_mock_allocation(self, symbol, action, reserved_capital, allocation_id=None):
+        import uuid
+        alloc_id = allocation_id or str(uuid.uuid4())
+        with self.executor.portfolio_engine._get_db_cursor_context() as cur:
+            if self.executor.portfolio_engine.db.use_sqlite:
+                cur.execute("""
+                    INSERT INTO portfolio_allocations (
+                        allocation_id, proposal_id, symbol, action, requested_risk_fraction, approved_risk_fraction,
+                        requested_notional, approved_notional, reserved_capital, status, reason_codes,
+                        portfolio_version, portfolio_digest, marks_provenance, config_hash, code_sha
+                    ) VALUES (?, ?, ?, ?, 0.1, 0.1, ?, ?, ?, 'PENDING', '[]', 1, '', '{}', 'v1', 'test_sha')
+                """, (alloc_id, str(uuid.uuid4()), symbol, action, reserved_capital, reserved_capital, reserved_capital))
+                quote = symbol.split("/")[-1].upper()
+                cur.execute("INSERT OR IGNORE INTO portfolio_cash (currency, cash, reserved) VALUES (?, 10000.0, 0.0)", (quote,))
+                cur.execute("UPDATE portfolio_cash SET reserved = reserved + ? WHERE currency = ?", (reserved_capital, quote))
+            else:
+                cur.execute("""
+                    INSERT INTO portfolio_allocations (
+                        allocation_id, proposal_id, symbol, action, requested_risk_fraction, approved_risk_fraction,
+                        requested_notional, approved_notional, reserved_capital, status, reason_codes,
+                        portfolio_version, portfolio_digest, marks_provenance, config_hash, code_sha
+                    ) VALUES (%s, %s, %s, %s, 0.1, 0.1, %s, %s, %s, 'PENDING', '[]'::jsonb, 1, '', '{}'::jsonb, 'v1', 'test_sha')
+                """, (alloc_id, str(uuid.uuid4()), symbol, action, reserved_capital, reserved_capital, reserved_capital))
+                quote = symbol.split("/")[-1].upper()
+                cur.execute("INSERT INTO portfolio_cash (currency, cash, reserved) VALUES (%s, 10000.0, 0.0) ON CONFLICT (currency) DO NOTHING", (quote,))
+                cur.execute("UPDATE portfolio_cash SET reserved = reserved + %s WHERE currency = %s", (reserved_capital, quote))
+        return alloc_id
+
     def setUp(self):
         # Always use clean, isolated sqlite in-memory DB by default (HST-08)
         self.db_url = "sqlite:///:memory:"
@@ -74,6 +102,7 @@ class HistoricalFailuresTests(unittest.TestCase):
     def test_hst_01_protection_orders_execute_when_crossed(self):
         # Correctly wiring intent.stop_price as stop loss (Blocker G1)
         intent_id = str(uuid.uuid4())
+        alloc_id = self._create_mock_allocation("BTC/USDC", "OPEN", 210.0)
         intent = ExecutionIntent(
             execution_intent_id=intent_id,
             risk_decision_id=str(uuid.uuid4()),
@@ -86,7 +115,8 @@ class HistoricalFailuresTests(unittest.TestCase):
             take_profit_price=120.0,
             client_order_id="order-hst-01-open",
             created_at=NOW,
-            expires_at=NOW + timedelta(minutes=5)
+            expires_at=NOW + timedelta(minutes=5),
+            allocation_id=alloc_id
         )
         
         # Execute order at $100.0
@@ -119,6 +149,7 @@ class HistoricalFailuresTests(unittest.TestCase):
     def test_hst_02_postgresql_concurrency_toctou_prevention(self):
         # Test serializability and state-checking under concurrent allocation
         # First order uses $200 of cash (quantity 2.0 @ 100.0)
+        alloc_id1 = self._create_mock_allocation("BTC/USDC", "OPEN", 810.0)
         intent1 = ExecutionIntent(
             execution_intent_id=str(uuid.uuid4()),
             risk_decision_id=str(uuid.uuid4()),
@@ -129,12 +160,14 @@ class HistoricalFailuresTests(unittest.TestCase):
             quantity=8.0, # costs ~ $800 + fees, fits inside $1000 cash
             client_order_id="order-hst-02-1",
             created_at=NOW,
-            expires_at=NOW + timedelta(minutes=5)
+            expires_at=NOW + timedelta(minutes=5),
+            allocation_id=alloc_id1
         )
         res1 = self.executor.execute_intent("lane_1", intent1, 100.0)
         self.assertEqual(res1.status, "FILLED")
 
         # Second order tries to buy same size, but cash is now too low (under $200 remaining)
+        alloc_id2 = self._create_mock_allocation("BTC/USDC", "ADD", 810.0)
         intent2 = ExecutionIntent(
             execution_intent_id=str(uuid.uuid4()),
             risk_decision_id=str(uuid.uuid4()),
@@ -145,7 +178,8 @@ class HistoricalFailuresTests(unittest.TestCase):
             quantity=8.0, # needs $800, fails atomic check
             client_order_id="order-hst-02-2",
             created_at=NOW,
-            expires_at=NOW + timedelta(minutes=5)
+            expires_at=NOW + timedelta(minutes=5),
+            allocation_id=alloc_id2
         )
         res2 = self.executor.execute_intent("lane_1", intent2, 100.0)
         self.assertEqual(res2.status, "REJECTED")
@@ -184,6 +218,10 @@ class HistoricalFailuresTests(unittest.TestCase):
                     cur.execute("DROP TABLE IF EXISTS execution_results CASCADE")
                     cur.execute("DROP TABLE IF EXISTS market_marks CASCADE")
                     cur.execute("DROP TABLE IF EXISTS arena_snapshots CASCADE")
+                    cur.execute("DROP TABLE IF EXISTS portfolio_cash CASCADE")
+                    cur.execute("DROP TABLE IF EXISTS portfolio_positions CASCADE")
+                    cur.execute("DROP TABLE IF EXISTS portfolio_allocations CASCADE")
+                    cur.execute("DROP TABLE IF EXISTS portfolio_metadata CASCADE")
                     
                     cur.execute("""
                     CREATE TABLE paper_balances (
@@ -234,7 +272,8 @@ class HistoricalFailuresTests(unittest.TestCase):
                         time_exit_at TIMESTAMPTZ,
                         client_order_id TEXT NOT NULL UNIQUE,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        expires_at TIMESTAMPTZ NOT NULL
+                        expires_at TIMESTAMPTZ NOT NULL,
+                        allocation_id TEXT
                     )""")
                     cur.execute("""
                     CREATE TABLE execution_results (
@@ -257,12 +296,80 @@ class HistoricalFailuresTests(unittest.TestCase):
                         price NUMERIC(20, 8) NOT NULL,
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
                     )""")
+                    cur.execute("""
+                    CREATE TABLE portfolio_cash (
+                        currency TEXT PRIMARY KEY,
+                        cash NUMERIC(28, 10) NOT NULL,
+                        reserved NUMERIC(28, 10) NOT NULL
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE portfolio_positions (
+                        symbol TEXT PRIMARY KEY,
+                        quantity NUMERIC(28, 10) NOT NULL,
+                        entry_price NUMERIC(28, 10) NOT NULL,
+                        realized_pnl NUMERIC(28, 10) NOT NULL,
+                        unrealized_pnl NUMERIC(28, 10) NOT NULL,
+                        stop_loss_price NUMERIC(28, 10),
+                        take_profit_price NUMERIC(28, 10),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE portfolio_allocations (
+                        allocation_id TEXT PRIMARY KEY,
+                        proposal_id TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        requested_risk_fraction NUMERIC(10, 6) NOT NULL,
+                        approved_risk_fraction NUMERIC(10, 6) NOT NULL,
+                        requested_notional NUMERIC(28, 10) NOT NULL,
+                        approved_notional NUMERIC(28, 10) NOT NULL,
+                        reserved_capital NUMERIC(28, 10) NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'PENDING',
+                        reason_codes JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        portfolio_version BIGINT NOT NULL,
+                        portfolio_digest TEXT NOT NULL,
+                        marks_provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        config_hash TEXT NOT NULL,
+                        code_sha TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE portfolio_metadata (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )""")
             conn.close()
         except Exception as e:
             self.fail(f"Failed to connect and initialize test PostgreSQL using TEST_POSTGRES_URL: {e}")
 
         pg_executor = PaperExecutor(db_url=pg_url)
         pg_executor.initialize_lane("lane_concurrency_test", 2000.0)
+
+        # Initialize portfolio tables (Postgres)
+        pg_executor.portfolio_engine.initialize_portfolio(2000.0)
+
+        alloc_id_btc = str(uuid.uuid4())
+        alloc_id_eth = str(uuid.uuid4())
+
+        # Save PENDING allocations for BTC and ETH in Postgres test DB
+        with pg_executor.portfolio_engine._get_db_cursor_context() as cur:
+            cur.execute("""
+                INSERT INTO portfolio_allocations (
+                    allocation_id, proposal_id, symbol, action, requested_risk_fraction, approved_risk_fraction,
+                    requested_notional, approved_notional, reserved_capital, status, reason_codes,
+                    portfolio_version, portfolio_digest, marks_provenance, config_hash, code_sha
+                ) VALUES (%s, %s, %s, 'OPEN', 0.1, 0.1, 100.0, 100.0, 100.0, 'PENDING', '[]'::jsonb, 1, '', '{}'::jsonb, 'v1', 'test_sha')
+            """, (alloc_id_btc, str(uuid.uuid4()), "BTC/USDC"))
+            cur.execute("""
+                INSERT INTO portfolio_allocations (
+                    allocation_id, proposal_id, symbol, action, requested_risk_fraction, approved_risk_fraction,
+                    requested_notional, approved_notional, reserved_capital, status, reason_codes,
+                    portfolio_version, portfolio_digest, marks_provenance, config_hash, code_sha
+                ) VALUES (%s, %s, %s, 'OPEN', 0.1, 0.1, 100.0, 100.0, 100.0, 'PENDING', '[]'::jsonb, 1, '', '{}'::jsonb, 'v1', 'test_sha')
+            """, (alloc_id_eth, str(uuid.uuid4()), "ETH/USDC"))
+            
+            # Update reserved in portfolio_cash to match
+            cur.execute("UPDATE portfolio_cash SET reserved = 200.0 WHERE currency = 'USDC'")
 
         # We set max_open_positions = 1.
         # We spawn two concurrent threads to open BTC and ETH at the same time.
@@ -277,7 +384,8 @@ class HistoricalFailuresTests(unittest.TestCase):
             quantity=1.0,
             client_order_id="order-concur-btc",
             created_at=NOW,
-            expires_at=NOW + timedelta(minutes=5)
+            expires_at=NOW + timedelta(minutes=5),
+            allocation_id=alloc_id_btc
         )
         intent_eth = ExecutionIntent(
             execution_intent_id=str(uuid.uuid4()),
@@ -289,7 +397,8 @@ class HistoricalFailuresTests(unittest.TestCase):
             quantity=1.0,
             client_order_id="order-concur-eth",
             created_at=NOW,
-            expires_at=NOW + timedelta(minutes=5)
+            expires_at=NOW + timedelta(minutes=5),
+            allocation_id=alloc_id_eth
         )
 
         results = []
@@ -405,6 +514,7 @@ class HistoricalFailuresTests(unittest.TestCase):
         self.executor.update_market_mark("ETH/USDC", 10.0)
 
         # Open BTC position (quantity 2)
+        alloc_id1 = self._create_mock_allocation("BTC/USDC", "OPEN", 210.0)
         intent1 = ExecutionIntent(
             execution_intent_id=str(uuid.uuid4()),
             risk_decision_id=str(uuid.uuid4()),
@@ -415,12 +525,14 @@ class HistoricalFailuresTests(unittest.TestCase):
             quantity=2.0,
             client_order_id="open-btc-mark",
             created_at=NOW,
-            expires_at=NOW + timedelta(minutes=5)
+            expires_at=NOW + timedelta(minutes=5),
+            allocation_id=alloc_id1
         )
         res1 = self.executor.execute_intent("lane_1", intent1, 100.0)
         self.assertEqual(res1.status, "FILLED")
 
         # Open ETH position (quantity 5)
+        alloc_id2 = self._create_mock_allocation("ETH/USDC", "OPEN", 60.0)
         intent2 = ExecutionIntent(
             execution_intent_id=str(uuid.uuid4()),
             risk_decision_id=str(uuid.uuid4()),
@@ -431,7 +543,8 @@ class HistoricalFailuresTests(unittest.TestCase):
             quantity=5.0,
             client_order_id="open-eth-mark",
             created_at=NOW,
-            expires_at=NOW + timedelta(minutes=5)
+            expires_at=NOW + timedelta(minutes=5),
+            allocation_id=alloc_id2
         )
         res2 = self.executor.execute_intent("lane_1", intent2, 10.0)
         self.assertEqual(res2.status, "FILLED")
@@ -448,9 +561,12 @@ class HistoricalFailuresTests(unittest.TestCase):
 
     # --- HST-06 & G2: Net metrics do not double count fees & correct slippage scaling ---
     def test_hst_06_fee_scoring_and_double_counting_protection(self):
+        # Reset global portfolio to match the lane's initial cash sandbox (Requirement E1)
+        self.executor.portfolio_engine.reset_portfolio_explicit(2000.0)
         # Initialize a dedicated lane with enough cash to fit the trade (Blocker G2/G3)
         self.executor.initialize_lane("lane_hst_06", 2000.0)
         
+        alloc_id = self._create_mock_allocation("BTC/USDC", "OPEN", 1100.0)
         intent = ExecutionIntent(
             execution_intent_id=str(uuid.uuid4()),
             risk_decision_id=str(uuid.uuid4()),
@@ -461,7 +577,8 @@ class HistoricalFailuresTests(unittest.TestCase):
             quantity=10.0, # Test quantity > 1 (Blocker G2)
             client_order_id="hst-06-order",
             created_at=NOW,
-            expires_at=NOW + timedelta(minutes=5)
+            expires_at=NOW + timedelta(minutes=5),
+            allocation_id=alloc_id
         )
         res = self.executor.execute_intent("lane_hst_06", intent, 100.0)
         self.assertEqual(res.status, "FILLED")
@@ -510,6 +627,7 @@ class HistoricalFailuresTests(unittest.TestCase):
     def test_hst_09_restart_idempotency_and_order_fencing(self):
         # Verify that a unique client_order_id prevents duplicate orders on restart
         client_order_id = "rebuild-btc-order-unique-1"
+        alloc_id = self._create_mock_allocation("BTC/USDC", "OPEN", 110.0)
         intent1 = ExecutionIntent(
             execution_intent_id=str(uuid.uuid4()),
             risk_decision_id=str(uuid.uuid4()),
@@ -520,7 +638,8 @@ class HistoricalFailuresTests(unittest.TestCase):
             quantity=1.0,
             client_order_id=client_order_id,
             created_at=NOW,
-            expires_at=NOW + timedelta(minutes=5)
+            expires_at=NOW + timedelta(minutes=5),
+            allocation_id=alloc_id
         )
         res1 = self.executor.execute_intent("lane_1", intent1, 100.0)
         self.assertEqual(res1.status, "FILLED")
@@ -536,7 +655,8 @@ class HistoricalFailuresTests(unittest.TestCase):
             quantity=1.0,
             client_order_id=client_order_id,
             created_at=NOW,
-            expires_at=NOW + timedelta(minutes=5)
+            expires_at=NOW + timedelta(minutes=5),
+            allocation_id=alloc_id
         )
         res2 = self.executor.execute_intent("lane_1", intent2, 100.0)
         self.assertEqual(res2.status, "FILLED")

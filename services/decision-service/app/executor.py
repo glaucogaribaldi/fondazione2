@@ -7,6 +7,8 @@ from typing import Literal, Any
 import sqlite3
 import json
 from .models import ExecutionIntent, ExecutionResult, RiskDecision, Action
+from .portfolio import PortfolioEngine
+from .products import get_product_mapping
 
 
 class DatabaseConnection:
@@ -80,7 +82,8 @@ class DatabaseConnection:
             time_exit_at TEXT,
             client_order_id TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            expires_at TEXT NOT NULL
+            expires_at TEXT NOT NULL,
+            allocation_id TEXT
         )""")
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS execution_results (
@@ -228,6 +231,48 @@ class DatabaseConnection:
             cash REAL NOT NULL,
             timestamp TEXT NOT NULL
         )""")
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio_cash (
+            currency TEXT PRIMARY KEY,
+            cash REAL NOT NULL DEFAULT 0.0,
+            reserved REAL NOT NULL DEFAULT 0.0
+        )""")
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio_positions (
+            symbol TEXT PRIMARY KEY,
+            quantity REAL NOT NULL DEFAULT 0.0,
+            entry_price REAL NOT NULL DEFAULT 0.0,
+            realized_pnl REAL NOT NULL DEFAULT 0.0,
+            unrealized_pnl REAL NOT NULL DEFAULT 0.0,
+            stop_loss_price REAL,
+            take_profit_price REAL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio_allocations (
+            allocation_id TEXT PRIMARY KEY,
+            proposal_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            action TEXT NOT NULL,
+            requested_risk_fraction REAL NOT NULL,
+            approved_risk_fraction REAL NOT NULL,
+            requested_notional REAL NOT NULL,
+            approved_notional REAL NOT NULL,
+            reserved_capital REAL NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PENDING',
+            reason_codes TEXT NOT NULL DEFAULT '[]',
+            portfolio_version INTEGER NOT NULL,
+            portfolio_digest TEXT NOT NULL,
+            marks_provenance TEXT NOT NULL DEFAULT '{}',
+            config_hash TEXT NOT NULL,
+            code_sha TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )""")
         self.sqlite_conn.commit()
 
     def _init_postgres_schema(self):
@@ -300,8 +345,22 @@ class DatabaseConnection:
                         time_exit_at TIMESTAMPTZ,
                         client_order_id TEXT NOT NULL UNIQUE,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        expires_at TIMESTAMPTZ NOT NULL
+                        expires_at TIMESTAMPTZ NOT NULL,
+                        allocation_id TEXT
                     )""")
+
+                    # Run schema migrations to add allocation_id to execution_intents on Postgres (D5)
+                    cur.execute("""
+                        DO $$
+                        BEGIN
+                            BEGIN
+                                ALTER TABLE execution_intents ADD COLUMN allocation_id TEXT;
+                            EXCEPTION
+                                WHEN duplicate_column THEN NULL;
+                            END;
+                        END;
+                        $$;
+                    """)
                     cur.execute("""
                     CREATE TABLE IF NOT EXISTS execution_results (
                         id BIGSERIAL PRIMARY KEY,
@@ -459,6 +518,48 @@ class DatabaseConnection:
                         cash NUMERIC(28,10) NOT NULL,
                         timestamp TIMESTAMPTZ NOT NULL
                     )""")
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS portfolio_cash (
+                        currency TEXT PRIMARY KEY,
+                        cash NUMERIC(28,10) NOT NULL DEFAULT 0,
+                        reserved NUMERIC(28,10) NOT NULL DEFAULT 0
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS portfolio_positions (
+                        symbol TEXT PRIMARY KEY,
+                        quantity NUMERIC(28,10) NOT NULL DEFAULT 0,
+                        entry_price NUMERIC(28,10) NOT NULL DEFAULT 0,
+                        realized_pnl NUMERIC(28,10) NOT NULL DEFAULT 0,
+                        unrealized_pnl NUMERIC(28,10) NOT NULL DEFAULT 0,
+                        stop_loss_price NUMERIC(28,10),
+                        take_profit_price NUMERIC(28,10),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS portfolio_allocations (
+                        allocation_id TEXT PRIMARY KEY,
+                        proposal_id TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        requested_risk_fraction NUMERIC(10,6) NOT NULL,
+                        approved_risk_fraction NUMERIC(10,6) NOT NULL,
+                        requested_notional NUMERIC(28,10) NOT NULL,
+                        approved_notional NUMERIC(28,10) NOT NULL,
+                        reserved_capital NUMERIC(28,10) NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'PENDING',
+                        reason_codes JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        portfolio_version BIGINT NOT NULL,
+                        portfolio_digest TEXT NOT NULL,
+                        marks_provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        config_hash TEXT NOT NULL,
+                        code_sha TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS portfolio_metadata (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )""")
             conn.close()
             print("Database: Unified PostgreSQL production schema checked and initialized.")
         except Exception as e:
@@ -483,6 +584,10 @@ class PaperExecutor:
         self.db = DatabaseConnection(db_url)
         self.fee_rate = fee_rate
         self.slippage_rate = slippage_rate
+        self.portfolio_engine = PortfolioEngine(db_url=self.db.db_url)
+        self._test_failure_injection = False
+        if self.db.use_sqlite:
+            self.portfolio_engine.db.sqlite_conn = self.db.sqlite_conn
 
     def initialize_lane(self, lane_id: str, initial_cash: float):
         """
@@ -491,10 +596,14 @@ class PaperExecutor:
         conn = self.db.get_cursor()
         try:
             if self.db.use_sqlite:
-                conn.execute(
-                    "INSERT OR IGNORE INTO paper_balances (lane_id, equity, cash) VALUES (?, ?, ?)",
-                    (lane_id, initial_cash, initial_cash)
-                )
+                row = conn.execute("SELECT 1 FROM paper_balances WHERE lane_id = ?", (lane_id,)).fetchone()
+                if not row:
+                    # Brand-new lane setup! Safe initialization (no destructive reset)
+                    self.portfolio_engine.initialize_portfolio(initial_cash)
+                    conn.execute(
+                        "INSERT OR IGNORE INTO paper_balances (lane_id, equity, cash) VALUES (?, ?, ?)",
+                        (lane_id, initial_cash, initial_cash)
+                    )
                 conn.execute(
                     "INSERT OR IGNORE INTO arena_snapshots (lane_id, equity, cash, realized_pnl, unrealized_pnl, fees, max_drawdown_pct) "
                     "SELECT ?, ?, ?, 0.0, 0.0, 0.0, 0.0 WHERE NOT EXISTS (SELECT 1 FROM arena_snapshots WHERE lane_id = ?)",
@@ -504,11 +613,15 @@ class PaperExecutor:
             else:
                 with conn:
                     with conn.cursor() as cur:
-                        cur.execute(
-                            "INSERT INTO paper_balances (lane_id, equity, cash) VALUES (%s, %s, %s) "
-                            "ON CONFLICT (lane_id) DO NOTHING",
-                            (lane_id, initial_cash, initial_cash)
-                        )
+                        cur.execute("SELECT 1 FROM paper_balances WHERE lane_id = %s", (lane_id,))
+                        if not cur.fetchone():
+                            # Brand-new lane setup! Safe initialization (no destructive reset)
+                            self.portfolio_engine.initialize_portfolio(initial_cash)
+                            cur.execute(
+                                "INSERT INTO paper_balances (lane_id, equity, cash) VALUES (%s, %s, %s) "
+                                "ON CONFLICT (lane_id) DO NOTHING",
+                                (lane_id, initial_cash, initial_cash)
+                            )
                         cur.execute(
                             "INSERT INTO arena_snapshots (lane_id, equity, cash, realized_pnl, unrealized_pnl, fees, max_drawdown_pct) "
                             "SELECT %s, %s, %s, 0.0, 0.0, 0.0, 0.0 WHERE NOT EXISTS (SELECT 1 FROM arena_snapshots WHERE lane_id = %s)",
@@ -630,22 +743,48 @@ class PaperExecutor:
                 conn.close()
 
     def get_balance(self, lane_id: str) -> dict[str, float]:
-        conn = self.db.get_cursor()
+        # Check if lane_id actually exists in paper_balances for backward compatibility and L5 safety gates!
+        conn_check = self.db.get_cursor()
         try:
             if self.db.use_sqlite:
-                row = conn.execute("SELECT equity, cash FROM paper_balances WHERE lane_id = ?", (lane_id,)).fetchone()
-                if row:
-                    return {"equity": row["equity"], "cash": row["cash"]}
+                row = conn_check.execute("SELECT 1 FROM paper_balances WHERE lane_id = ?", (lane_id,)).fetchone()
+                if not row:
+                    return {}
             else:
-                with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    cur.execute("SELECT equity, cash FROM paper_balances WHERE lane_id = %s", (lane_id,))
-                    row = cur.fetchone()
-                    if row:
-                        return {"equity": float(row["equity"]), "cash": float(row["cash"])}
-            return {"equity": 0.0, "cash": 0.0}
+                with conn_check.cursor() as cur:
+                    cur.execute("SELECT 1 FROM paper_balances WHERE lane_id = %s", (lane_id,))
+                    if not cur.fetchone():
+                        return {}
         finally:
             if not self.db.use_sqlite:
-                conn.close()
+                conn_check.close()
+
+        def get_mark_func(sym: str) -> float | None:
+            m = self.get_market_mark(sym)
+            return m["price"] if m else None
+            
+        try:
+            snap = self.portfolio_engine.load_portfolio_snapshot(get_mark_func)
+            base_cash = snap.cash.get(self.portfolio_engine.base_currency, 10000.0)
+            return {"equity": snap.equity, "cash": base_cash}
+        except Exception as e:
+            print(f"PaperExecutor: get_balance failed, falling back: {e}")
+            conn = self.db.get_cursor()
+            try:
+                if self.db.use_sqlite:
+                    row = conn.execute("SELECT equity, cash FROM paper_balances WHERE lane_id = ?", (lane_id,)).fetchone()
+                    if row:
+                        return {"equity": float(row[0]), "cash": float(row[1])}
+                else:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        cur.execute("SELECT equity, cash FROM paper_balances WHERE lane_id = %s", (lane_id,))
+                        row = cur.fetchone()
+                        if row:
+                            return {"equity": float(row["equity"]), "cash": float(row["cash"])}
+            finally:
+                if not self.db.use_sqlite:
+                    conn.close()
+            return {"equity": 0.0, "cash": 0.0}
 
     def get_position(self, lane_id: str, symbol: str) -> dict[str, Any] | None:
         conn = self.db.get_cursor()
@@ -786,27 +925,80 @@ class PaperExecutor:
                 current_qty = pos_row["quantity"] if pos_row else 0.0
                 current_entry = pos_row["entry_price"] if pos_row else 0.0
 
+                p_mapping = get_product_mapping(intent.symbol)
+                quote = p_mapping.canonical_symbol.split("/")[-1].upper()
+                
+                # Fetch allocation from DB using intent.allocation_id (Requirement E5)
+                allocation_id = intent.allocation_id
+                if not allocation_id:
+                    if intent.action in ["OPEN", "ADD"]:
+                        return self._reject_intent(conn, intent, "MISSING_ALLOCATION_ID", extra_reasons=reasons_list)
+                    else:
+                        alloc_row = None
+                else:
+                    alloc_row = conn.execute(
+                        "SELECT symbol, action, status, reserved_capital, approved_notional FROM portfolio_allocations WHERE allocation_id = ?",
+                        (allocation_id,)
+                    ).fetchone()
+
+                if allocation_id and not alloc_row:
+                    return self._reject_intent(conn, intent, "ALLOCATION_NOT_FOUND", extra_reasons=reasons_list)
+
+                if alloc_row:
+                    alloc_symbol = alloc_row[0]
+                    alloc_action = alloc_row[1]
+                    alloc_status = alloc_row[2]
+                    reserved_capital = float(alloc_row[3])
+                    approved_notional = float(alloc_row[4])
+
+                    # Validate allocation details (Requirement E5)
+                    if alloc_symbol != intent.symbol:
+                        return self._reject_intent(conn, intent, "ALLOCATION_SYMBOL_MISMATCH", extra_reasons=reasons_list)
+                    if alloc_action != intent.action:
+                        return self._reject_intent(conn, intent, "ALLOCATION_ACTION_MISMATCH", extra_reasons=reasons_list)
+                    if alloc_status != "PENDING":
+                        return self._reject_intent(conn, intent, "ALLOCATION_STATUS_NOT_PENDING", extra_reasons=reasons_list)
+                else:
+                    reserved_capital = 0.0
+                    approved_notional = 0.0
+
                 # Recheck portfolio open positions count (HST-02 / G3 portfolio reservation)
                 if intent.action == "OPEN" and max_open_positions is not None:
                     active_cnt_row = conn.execute("SELECT COUNT(*) as cnt FROM paper_positions WHERE lane_id = ? AND quantity > 0", (lane_id,)).fetchone()
                     active_cnt = active_cnt_row["cnt"] if active_cnt_row else 0
                     if active_cnt >= max_open_positions:
+                        if allocation_id and reserved_capital > 0.0:
+                            self.portfolio_engine.release_reservation(allocation_id, quote, reserved_capital)
+                            self.portfolio_engine.update_allocation_status(allocation_id, "RELEASED")
                         return self._reject_intent(conn, intent, "OPEN_POSITION_LIMIT", extra_reasons=reasons_list)
 
                 # G2 Slippage Dimensional Math
                 slippage_factor = 1.0 + self.slippage_rate if intent.side == "BUY" else 1.0 - self.slippage_rate
                 adjusted_fill_price = fill_price * slippage_factor
                 
-                # Fees & slippage calculations
+                # Fees & slippage calculations (Requirement E4)
                 quantity = intent.quantity
                 fee = quantity * fill_price * self.fee_rate
                 slippage_cost = quantity * abs(adjusted_fill_price - fill_price)
                 total_cost = (quantity * adjusted_fill_price) + fee
 
+                # For BUY, if total_cost exceeds reserved_capital, we dynamically scale down the quantity to fit exactly (E4)
+                if intent.side == "BUY" and reserved_capital > 0.0 and total_cost > reserved_capital:
+                    quantity = reserved_capital / (fill_price * (1.0 + self.slippage_rate + self.fee_rate))
+                    fee = quantity * fill_price * self.fee_rate
+                    slippage_cost = quantity * abs(adjusted_fill_price - fill_price)
+                    total_cost = (quantity * adjusted_fill_price) + fee
+
                 # Validate
                 if intent.side == "BUY" and cash < total_cost:
+                    if allocation_id and reserved_capital > 0.0:
+                        self.portfolio_engine.release_reservation(allocation_id, quote, reserved_capital)
+                        self.portfolio_engine.update_allocation_status(allocation_id, "RELEASED")
                     return self._reject_intent(conn, intent, "INSUFFICIENT_CASH", extra_reasons=reasons_list)
                 if intent.side == "SELL" and current_qty < quantity:
+                    if allocation_id and reserved_capital > 0.0:
+                        self.portfolio_engine.release_reservation(allocation_id, quote, reserved_capital)
+                        self.portfolio_engine.update_allocation_status(allocation_id, "RELEASED")
                     return self._reject_intent(conn, intent, "INSUFFICIENT_POSITION", extra_reasons=reasons_list)
 
                 # Perform balance and position state updates
@@ -824,6 +1016,7 @@ class PaperExecutor:
                 else: # SELL
                     new_cash = cash + (quantity * adjusted_fill_price) - fee
                     new_qty = current_qty - quantity
+                    new_entry = current_entry
                     if new_qty <= 0.00001:
                         conn.execute("DELETE FROM paper_positions WHERE lane_id = ? AND symbol = ?", (lane_id, intent.symbol))
                     else:
@@ -857,20 +1050,58 @@ class PaperExecutor:
                 new_equity = new_cash + mtm_value
                 conn.execute("UPDATE paper_balances SET cash = ?, equity = ? WHERE lane_id = ?", (new_cash, new_equity, lane_id))
 
-                # Insert Intent & Result (atomically saving H2 reason codes)
+                # Commit/deposit in PortfolioEngine (SQLite)
+                if intent.side == "BUY":
+                    if allocation_id:
+                        self.portfolio_engine.commit_allocation(allocation_id, quote, reserved_capital, total_cost)
+                        self.portfolio_engine.update_allocation_status(allocation_id, "COMMITTED")
+                    else:
+                        conn.execute("UPDATE portfolio_cash SET cash = cash - ? WHERE currency = ?", (total_cost, quote))
+                else: # SELL
+                    proceeds = (quantity * adjusted_fill_price) - fee
+                    self.portfolio_engine.deposit_cash(quote, proceeds)
+                    if allocation_id:
+                        self.portfolio_engine.update_allocation_status(allocation_id, "COMMITTED")
+                        
+                # Update positions in PortfolioEngine
+                self.portfolio_engine.update_position(intent.symbol, new_qty, new_entry, intent.stop_price, intent.take_profit_price)
+
+                # Load fresh MTM snapshot from PortfolioEngine to sync derived compatibility states (D6 - One Accounting Truth)
+                def get_mark_func(sym: str) -> float | None:
+                    m = self.get_market_mark(sym)
+                    return m["price"] if m else None
+                snap = self.portfolio_engine.load_portfolio_snapshot(get_mark_func)
+                
+                new_cash = snap.cash.get(self.portfolio_engine.base_currency, 10000.0)
+                new_equity = snap.equity
+                conn.execute("UPDATE paper_balances SET cash = ?, equity = ? WHERE lane_id = ?", (new_cash, new_equity, lane_id))
+                
+                # Sync paper_positions with snap.positions
+                conn.execute("DELETE FROM paper_positions WHERE lane_id = ?", (lane_id,))
+                for pos_sym, pos_data in snap.positions.items():
+                    conn.execute("""
+                        INSERT INTO paper_positions (lane_id, symbol, quantity, entry_price, stop_loss_price, take_profit_price)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (lane_id, pos_sym, pos_data["quantity"], pos_data["entry_price"], pos_data["stop_loss_price"], pos_data["take_profit_price"]))
+
+                # Insert Intent & Result with allocation_id (D5)
                 broker_id = f"paper-{uuid.uuid4()}"
                 conn.execute(
-                    "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, str(intent.time_exit_at), intent.client_order_id, str(intent.expires_at))
+                    "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at, allocation_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, str(intent.time_exit_at), intent.client_order_id, str(intent.expires_at), allocation_id)
                 )
                 final_reasons = reasons_list + ["EXECUTED_PAPER"]
                 conn.execute(
                     "INSERT INTO execution_results (execution_intent_id, broker_order_id, status, requested_quantity, filled_quantity, average_fill_price, fee, slippage, reason_codes) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (intent.execution_intent_id, broker_id, "FILLED", intent.quantity, intent.quantity, adjusted_fill_price, fee, slippage_cost, json.dumps(final_reasons))
+                    (intent.execution_intent_id, broker_id, "FILLED", intent.quantity, quantity, adjusted_fill_price, fee, slippage_cost, json.dumps(final_reasons))
                 )
                 self._write_arena_snapshot(conn, None, lane_id, intent.symbol, adjusted_fill_price, fee, is_sqlite=True)
+
+                if self._test_failure_injection:
+                    raise RuntimeError("Failure injection before commit (SQLite)")
+
                 self.db.sqlite_conn.commit()
 
             else:
@@ -925,28 +1156,82 @@ class PaperExecutor:
                         current_qty = float(pos_row["quantity"]) if pos_row else 0.0
                         current_entry = float(pos_row["entry_price"]) if pos_row else 0.0
 
+                        p_mapping = get_product_mapping(intent.symbol)
+                        quote = p_mapping.canonical_symbol.split("/")[-1].upper()
+                        
+                        # Fetch allocation from DB using intent.allocation_id (Requirement E3, E5)
+                        allocation_id = intent.allocation_id
+                        if not allocation_id:
+                            if intent.action in ["OPEN", "ADD"]:
+                                return self._reject_intent_postgres(cur, intent, "MISSING_ALLOCATION_ID", extra_reasons=reasons_list)
+                            else:
+                                alloc_row = None
+                        else:
+                            cur.execute(
+                                "SELECT symbol, action, status, reserved_capital, approved_notional FROM portfolio_allocations WHERE allocation_id = %s FOR UPDATE",
+                                (allocation_id,)
+                            )
+                            alloc_row = cur.fetchone()
+
+                        if allocation_id and not alloc_row:
+                            return self._reject_intent_postgres(cur, intent, "ALLOCATION_NOT_FOUND", extra_reasons=reasons_list)
+
+                        if alloc_row:
+                            alloc_symbol = alloc_row["symbol"]
+                            alloc_action = alloc_row["action"]
+                            alloc_status = alloc_row["status"]
+                            reserved_capital = float(alloc_row["reserved_capital"])
+                            approved_notional = float(alloc_row["approved_notional"])
+
+                            # Validate allocation details (Requirement E5)
+                            if alloc_symbol != intent.symbol:
+                                return self._reject_intent_postgres(cur, intent, "ALLOCATION_SYMBOL_MISMATCH", extra_reasons=reasons_list)
+                            if alloc_action != intent.action:
+                                return self._reject_intent_postgres(cur, intent, "ALLOCATION_ACTION_MISMATCH", extra_reasons=reasons_list)
+                            if alloc_status != "PENDING":
+                                return self._reject_intent_postgres(cur, intent, "ALLOCATION_STATUS_NOT_PENDING", extra_reasons=reasons_list)
+                        else:
+                            reserved_capital = 0.0
+                            approved_notional = 0.0
+
                         # Recheck portfolio open positions count (HST-02 / G3 portfolio reservation)
                         if intent.action == "OPEN" and max_open_positions is not None:
                             cur.execute("SELECT COUNT(*) as cnt FROM paper_positions WHERE lane_id = %s AND quantity > 0", (lane_id,))
                             active_cnt_row = cur.fetchone()
                             active_cnt = active_cnt_row["cnt"] if active_cnt_row else 0
                             if active_cnt >= max_open_positions:
+                                if allocation_id and reserved_capital > 0.0:
+                                    self.portfolio_engine.release_reservation(allocation_id, quote, reserved_capital, cur=cur)
+                                    self.portfolio_engine.update_allocation_status(allocation_id, "RELEASED", cur=cur)
                                 return self._reject_intent_postgres(cur, intent, "OPEN_POSITION_LIMIT", extra_reasons=reasons_list)
 
                         # G2 Slippage Dimensional Math
                         slippage_factor = 1.0 + self.slippage_rate if intent.side == "BUY" else 1.0 - self.slippage_rate
                         adjusted_fill_price = fill_price * slippage_factor
                         
-                        # Fees & slippage calculations
+                        # Fees & slippage calculations (Requirement E4)
                         quantity = intent.quantity
                         fee = quantity * fill_price * self.fee_rate
                         slippage_cost = quantity * abs(adjusted_fill_price - fill_price)
                         total_cost = (quantity * adjusted_fill_price) + fee
 
+                        # For BUY, if total_cost exceeds reserved_capital, we dynamically scale down the quantity to fit exactly (E4)
+                        if intent.side == "BUY" and reserved_capital > 0.0 and total_cost > reserved_capital:
+                            quantity = reserved_capital / (fill_price * (1.0 + self.slippage_rate + self.fee_rate))
+                            fee = quantity * fill_price * self.fee_rate
+                            slippage_cost = quantity * abs(adjusted_fill_price - fill_price)
+                            total_cost = (quantity * adjusted_fill_price) + fee
+
                         # Validate
                         if intent.side == "BUY" and cash < total_cost:
+                            if allocation_id and reserved_capital > 0.0:
+                                self.portfolio_engine.release_reservation(allocation_id, quote, reserved_capital, cur=cur)
+                                self.portfolio_engine.update_allocation_status(allocation_id, "RELEASED", cur=cur)
                             return self._reject_intent_postgres(cur, intent, "INSUFFICIENT_CASH", extra_reasons=reasons_list)
                         if intent.side == "SELL" and current_qty < quantity:
+                            if allocation_id and reserved_capital > 0.0:
+                                self.portfolio_engine.release_reservation(allocation_id, quote, reserved_capital, cur=cur)
+                                self.portfolio_engine.update_allocation_status(allocation_id, "RELEASED", cur=cur)
                             return self._reject_intent_postgres(cur, intent, "INSUFFICIENT_POSITION", extra_reasons=reasons_list)
 
                         # Perform state updates
@@ -955,7 +1240,6 @@ class PaperExecutor:
                             new_qty = current_qty + quantity
                             new_entry = ((current_qty * current_entry) + (quantity * adjusted_fill_price)) / new_qty
                             
-                            # G1 Wiring Correction: persist intent.stop_price into stop_loss_price
                             cur.execute(
                                 "INSERT INTO paper_positions (lane_id, symbol, quantity, entry_price, stop_loss_price, take_profit_price) "
                                 "VALUES (%s, %s, %s, %s, %s, %s) "
@@ -965,6 +1249,7 @@ class PaperExecutor:
                         else: # SELL
                             new_cash = cash + (quantity * adjusted_fill_price) - fee
                             new_qty = current_qty - quantity
+                            new_entry = current_entry
                             if new_qty <= 0.00001:
                                 cur.execute("DELETE FROM paper_positions WHERE lane_id = %s AND symbol = %s", (lane_id, intent.symbol))
                             else:
@@ -997,27 +1282,64 @@ class PaperExecutor:
                         new_equity = new_cash + mtm_value
                         cur.execute("UPDATE paper_balances SET cash = %s, equity = %s WHERE lane_id = %s", (new_cash, new_equity, lane_id))
 
-                        # Save Intent & Result (atomically saving H2 reason codes)
+                        # Commit/deposit in PortfolioEngine (Postgres - Requirement E3)
+                        if intent.side == "BUY":
+                            if allocation_id:
+                                self.portfolio_engine.commit_allocation(allocation_id, quote, reserved_capital, total_cost, cur=cur)
+                                self.portfolio_engine.update_allocation_status(allocation_id, "COMMITTED", cur=cur)
+                            else:
+                                cur.execute("UPDATE portfolio_cash SET cash = cash - %s WHERE currency = %s", (total_cost, quote))
+                        else: # SELL
+                            proceeds = (quantity * adjusted_fill_price) - fee
+                            self.portfolio_engine.deposit_cash(quote, proceeds, cur=cur)
+                            if allocation_id:
+                                self.portfolio_engine.update_allocation_status(allocation_id, "COMMITTED", cur=cur)
+                                
+                        # Update positions in PortfolioEngine (Postgres - Requirement E3)
+                        self.portfolio_engine.update_position(intent.symbol, new_qty, new_entry, intent.stop_price, intent.take_profit_price, cur=cur)
+
+                        # Load fresh MTM snapshot from PortfolioEngine to sync derived compatibility states (D6 - One Accounting Truth)
+                        def get_mark_func(sym: str) -> float | None:
+                            m = self.get_market_mark(sym)
+                            return m["price"] if m else None
+                        snap = self.portfolio_engine.load_portfolio_snapshot(get_mark_func, cur=cur)
+                        
+                        new_cash = snap.cash.get(self.portfolio_engine.base_currency, 10000.0)
+                        new_equity = snap.equity
+                        cur.execute("UPDATE paper_balances SET cash = %s, equity = %s WHERE lane_id = %s", (new_cash, new_equity, lane_id))
+                        
+                        # Sync paper_positions with snap.positions
+                        cur.execute("DELETE FROM paper_positions WHERE lane_id = %s", (lane_id,))
+                        for pos_sym, pos_data in snap.positions.items():
+                            cur.execute("""
+                                INSERT INTO paper_positions (lane_id, symbol, quantity, entry_price, stop_loss_price, take_profit_price)
+                                VALUES (%s, %s, %s, %s, %s, %s)
+                            """, (lane_id, pos_sym, pos_data["quantity"], pos_data["entry_price"], pos_data["stop_loss_price"], pos_data["take_profit_price"]))
+
+                        # Save Intent & Result with allocation_id (D5)
                         broker_id = f"paper-{uuid.uuid4()}"
                         cur.execute(
-                            "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at) "
-                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                            (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, intent.time_exit_at, intent.client_order_id, intent.expires_at)
+                            "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at, allocation_id) "
+                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                            (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, intent.time_exit_at, intent.client_order_id, intent.expires_at, allocation_id)
                         )
                         final_reasons = reasons_list + ["EXECUTED_PAPER"]
                         cur.execute(
                             "INSERT INTO execution_results (execution_intent_id, broker_order_id, status, requested_quantity, filled_quantity, average_fill_price, fee, slippage, reason_codes) "
                             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                            (intent.execution_intent_id, broker_id, "FILLED", intent.quantity, intent.quantity, adjusted_fill_price, fee, slippage_cost, json.dumps(final_reasons))
+                            (intent.execution_intent_id, broker_id, "FILLED", intent.quantity, quantity, adjusted_fill_price, fee, slippage_cost, json.dumps(final_reasons))
                         )
                         self._write_arena_snapshot(None, cur, lane_id, intent.symbol, adjusted_fill_price, fee, is_sqlite=False)
+
+                        if self._test_failure_injection:
+                            raise RuntimeError("Failure injection before commit (PostgreSQL)")
 
             return ExecutionResult(
                 execution_intent_id=intent.execution_intent_id,
                 broker_order_id=broker_id,
                 status="FILLED",
                 requested_quantity=intent.quantity,
-                filled_quantity=intent.quantity,
+                filled_quantity=quantity,
                 average_fill_price=adjusted_fill_price,
                 fee=fee,
                 slippage=slippage_cost,
@@ -1072,9 +1394,9 @@ class PaperExecutor:
     def _reject_intent(self, conn, intent: ExecutionIntent, reason: str, extra_reasons: list[str] | None = None) -> ExecutionResult:
         broker_id = "rejected-order"
         conn.execute(
-            "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, str(intent.time_exit_at), intent.client_order_id, str(intent.expires_at))
+            "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at, allocation_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, str(intent.time_exit_at), intent.client_order_id, str(intent.expires_at), intent.allocation_id)
         )
         final_reasons = (extra_reasons or []) + [reason]
         conn.execute(
@@ -1097,9 +1419,9 @@ class PaperExecutor:
     def _reject_intent_postgres(self, cur, intent: ExecutionIntent, reason: str, extra_reasons: list[str] | None = None) -> ExecutionResult:
         broker_id = "rejected-order"
         cur.execute(
-            "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, intent.time_exit_at, intent.client_order_id, intent.expires_at)
+            "INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, limit_price, stop_price, take_profit_price, time_exit_at, client_order_id, expires_at, allocation_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (intent.execution_intent_id, intent.risk_decision_id, intent.mode, intent.symbol, intent.action, intent.side, intent.quantity, intent.order_type, intent.limit_price, intent.stop_price, intent.take_profit_price, intent.time_exit_at, intent.client_order_id, intent.expires_at, intent.allocation_id)
         )
         final_reasons = (extra_reasons or []) + [reason]
         cur.execute(

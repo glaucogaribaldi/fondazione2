@@ -84,6 +84,7 @@ class DecisionResponse(BaseModel):
     approved_by_risk_engine: bool
     reason_codes: list[str]
     model_versions: dict[str, str]
+    allocation_id: str | None = None
 
 
 class RiskDecision(BaseModel):
@@ -113,6 +114,7 @@ class ExecutionIntent(BaseModel):
     client_order_id: str
     created_at: datetime
     expires_at: datetime
+    allocation_id: str | None = None
 
 
 class ExecutionResult(BaseModel):
