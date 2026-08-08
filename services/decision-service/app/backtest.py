@@ -4,6 +4,7 @@ import psycopg2
 import hashlib
 import json
 import uuid
+import random
 from datetime import datetime, UTC, timedelta
 from typing import List, Dict, Any, Optional
 from .products import registry, get_product_mapping
@@ -51,7 +52,6 @@ class HistoricalDataset:
         """
         filtered = []
         for c in self.candles:
-            # Parse candle_open
             try:
                 c_open = datetime.fromisoformat(c["candle_open"])
                 if c_open.tzinfo is None:
@@ -66,7 +66,7 @@ class HistoricalDataset:
 
 class CoinbaseReplayEngine:
     """
-    Deterministic Backtest and Replay Engine (Blocker G / H).
+    Deterministic Backtest and Replay Engine (Blocker G / H / A5 / A6).
     Reuses existing portfolio/risk contracts while running in isolated namespaces to prevent paper-state contamination.
     """
     def __init__(self, db_url: str | None = None):
@@ -171,6 +171,27 @@ class CoinbaseReplayEngine:
         run_id = f"run-{uuid.uuid4()}"
         print(f"Replay: Starting run {run_id} on dataset {dataset.dataset_id}")
 
+        # Seed the random number generator deterministically to simulate slippage! (Blocker A7)
+        rng = random.Random(seed)
+
+        # Blocker A5: Real dataset persistence into dataset_versions table before starting!
+        self._save_dataset_version(dataset, code_sha)
+
+        # Blocker A6: PostgreSQL Lifecycle — create the replay_runs row BEFORE execution rows!
+        config_hash = hashlib.sha256(f"{initial_cash}|{fee_rate}|{slippage_rate}|{seed}".encode("utf-8")).hexdigest()
+        self._save_replay_run_metadata(
+            run_id=run_id,
+            dataset_id=dataset.dataset_id,
+            config_hash=config_hash,
+            code_sha=code_sha,
+            seed=seed,
+            fee_rate=fee_rate,
+            slippage_rate=slippage_rate,
+            start_time=dataset.start_time,
+            end_time=dataset.end_time,
+            result_digest="IN_PROGRESS"
+        )
+
         # Isolated memory state
         cash = initial_cash
         equity = initial_cash
@@ -205,20 +226,21 @@ class CoinbaseReplayEngine:
                 latest_candle = sym_obs[-1]
                 price = latest_candle["close"]
                 
-                # Re-calculate MTM and equity dynamically (Blocker S1 / O1 / E)
+                # Blocker A6: Correct Accounting — equity = cash + market value of open positions!
+                market_value = 0.0
                 unrealized_pnl = 0.0
                 for pos_sym, pos in positions.items():
                     if pos["quantity"] > 0:
                         if pos_sym == sym:
                             pos_price = price
                         else:
-                            # Try to get other symbol's price as of current_time T
                             other_prod = get_product_mapping(pos_sym).execution_product_id
                             other_obs = [c for c in historical_obs if c["product_id"] == other_prod]
                             pos_price = other_obs[-1]["close"] if other_obs else pos["entry_price"]
+                        market_value += pos["quantity"] * pos_price
                         unrealized_pnl += pos["quantity"] * (pos_price - pos["entry_price"])
                 
-                equity = cash + unrealized_pnl
+                equity = cash + market_value
                 peak_equity = max(peak_equity, equity)
                 drawdown = ((peak_equity - equity) / peak_equity) * 100.0 if peak_equity > 0.0 else 0.0
 
@@ -240,15 +262,16 @@ class CoinbaseReplayEngine:
                         action = "CLOSE"
 
                 if action != "NO_TRADE":
-                    # Evaluate using deterministic Risk rules (or simple simulator parameters)
+                    # Evaluate using deterministic Risk rules
                     side = "BUY" if action == "OPEN" else "SELL"
                     qty = 0.0
                     
                     if action == "OPEN":
                         # Spend 10% of cash
                         allocated = cash * 0.1
-                        # Apply slippage factor (Blocker G)
-                        slippage_price = price * (1.0 + slippage_rate)
+                        # Blocker A7: apply randomized deterministic slippage based on seed!
+                        sim_slippage = slippage_rate * rng.uniform(0.9, 1.1)
+                        slippage_price = price * (1.0 + sim_slippage)
                         fee = allocated * fee_rate
                         qty = (allocated - fee) / slippage_price
                         
@@ -260,7 +283,9 @@ class CoinbaseReplayEngine:
                             self._write_replay_ledger(run_id, sym, "OPEN", "BUY", qty, slippage_price, fee, 0.0, unrealized_pnl, realized_pnl, equity, cash, current_time)
                     else: # CLOSE
                         qty = pos["quantity"]
-                        slippage_price = price * (1.0 - slippage_rate)
+                        # Blocker A7: apply randomized deterministic slippage based on seed!
+                        sim_slippage = slippage_rate * rng.uniform(0.9, 1.1)
+                        slippage_price = price * (1.0 - sim_slippage)
                         fee = qty * slippage_price * fee_rate
                         proceeds = (qty * slippage_price) - fee
                         
@@ -275,23 +300,9 @@ class CoinbaseReplayEngine:
             # Increment Replay Clock
             current_time += timedelta(seconds=timeframe)
 
-        # Generate a stable, deterministic result digest from all trades recorded in the replay ledger (Blocker H)
+        # 3. Blocker A6: PostgreSQL Lifecycle — Calculate final digest and finalize run metadata!
         result_digest = self._calculate_run_digest(run_id)
-        
-        # Save experiment metadata in the db
-        config_hash = hashlib.sha256(f"{initial_cash}|{fee_rate}|{slippage_rate}|{seed}".encode("utf-8")).hexdigest()
-        self._save_replay_run_metadata(
-            run_id=run_id,
-            dataset_id=dataset.dataset_id,
-            config_hash=config_hash,
-            code_sha=code_sha,
-            seed=seed,
-            fee_rate=fee_rate,
-            slippage_rate=slippage_rate,
-            start_time=dataset.start_time,
-            end_time=dataset.end_time,
-            result_digest=result_digest
-        )
+        self._update_replay_run_digest(run_id, result_digest)
 
         return {
             "run_id": run_id,
@@ -372,6 +383,30 @@ class CoinbaseReplayEngine:
         raw_str = "|".join(trade_rows)
         return hashlib.sha256(raw_str.encode("utf-8")).hexdigest()
 
+    def _save_dataset_version(self, dataset: HistoricalDataset, code_sha: str):
+        """
+        Persists dataset metadata into the dataset_versions table (Blocker A5).
+        """
+        with self._get_db_cursor_context() as cur:
+            symbols_json = json.dumps(dataset.canonical_symbols)
+            if self.db.use_sqlite:
+                cur.execute("""
+                    INSERT OR REPLACE INTO dataset_versions (
+                        dataset_id, dataset_hash, universe_hash, canonical_symbols, timeframe, start_time, end_time, as_of, preprocessing_version, code_sha, config_hash, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (
+                    dataset.dataset_id, dataset.dataset_hash, "v1", symbols_json, dataset.timeframe, dataset.start_time.isoformat(), dataset.end_time.isoformat(), dataset.as_of.isoformat(), "v1", code_sha, "v1"
+                ))
+            else:
+                cur.execute("""
+                    INSERT INTO dataset_versions (
+                        dataset_id, dataset_hash, universe_hash, canonical_symbols, timeframe, start_time, end_time, as_of, preprocessing_version, code_sha, config_hash, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                    ON CONFLICT (dataset_id) DO NOTHING
+                """, (
+                    dataset.dataset_id, dataset.dataset_hash, "v1", symbols_json, dataset.timeframe, dataset.start_time, dataset.end_time, dataset.as_of, "v1", code_sha, "v1"
+                ))
+
     def _save_replay_run_metadata(
         self,
         run_id: str,
@@ -402,3 +437,19 @@ class CoinbaseReplayEngine:
                 """, (
                     run_id, dataset_id, config_hash, code_sha, seed, fee_rate, slippage_rate, start_time, end_time, result_digest
                 ))
+
+    def _update_replay_run_digest(self, run_id: str, result_digest: str):
+        """
+        Updates the final result_digest for a finished replay run (Blocker A6).
+        """
+        with self._get_db_cursor_context() as cur:
+            if self.db.use_sqlite:
+                cur.execute(
+                    "UPDATE replay_runs SET result_digest = ? WHERE run_id = ?",
+                    (result_digest, run_id)
+                )
+            else:
+                cur.execute(
+                    "UPDATE replay_runs SET result_digest = %s WHERE run_id = %s",
+                    (result_digest, run_id)
+                )

@@ -46,24 +46,29 @@ class TestBacktestEngine(unittest.TestCase):
         # Insert some historical valid candles in SQLite DB
         self.start = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
         self.candles_raw = [
-            {"product_id": "BTC-USDC", "canonical_symbol": "BTC/USDC", "granularity": 300, "candle_open": (self.start + timedelta(minutes=0)).isoformat(), "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 10.0, "quality_state": "VALID"},
-            {"product_id": "BTC-USDC", "canonical_symbol": "BTC/USDC", "granularity": 300, "candle_open": (self.start + timedelta(minutes=5)).isoformat(), "open": 100.5, "high": 102.0, "low": 100.0, "close": 101.5, "volume": 10.0, "quality_state": "VALID"},
-            {"product_id": "BTC-USDC", "canonical_symbol": "BTC/USDC", "granularity": 300, "candle_open": (self.start + timedelta(minutes=10)).isoformat(), "open": 101.5, "high": 103.0, "low": 101.0, "close": 102.5, "volume": 10.0, "quality_state": "VALID"}
+            {"product_id": "BTC-USDC", "canonical_symbol": "BTC/USDC", "granularity": 300, "candle_open": (self.start + timedelta(minutes=0)).isoformat(), "open": 100.0, "high": 101.0, "low": 98.0, "close": 99.0, "volume": 10.0, "quality_state": "VALID"},
+            {"product_id": "BTC-USDC", "canonical_symbol": "BTC/USDC", "granularity": 300, "candle_open": (self.start + timedelta(minutes=5)).isoformat(), "open": 99.0, "high": 100.0, "low": 97.0, "close": 98.0, "volume": 10.0, "quality_state": "VALID"},
+            {"product_id": "BTC-USDC", "canonical_symbol": "BTC/USDC", "granularity": 300, "candle_open": (self.start + timedelta(minutes=10)).isoformat(), "open": 98.0, "high": 99.0, "low": 96.0, "close": 97.0, "volume": 10.0, "quality_state": "VALID"},
+            {"product_id": "BTC-USDC", "canonical_symbol": "BTC/USDC", "granularity": 300, "candle_open": (self.start + timedelta(minutes=15)).isoformat(), "open": 97.0, "high": 110.0, "low": 96.0, "close": 105.0, "volume": 10.0, "quality_state": "VALID"}
         ]
         
         with self.engine._get_db_cursor_context() as cur:
             for c in self.candles_raw:
                 cur.execute("""
                     INSERT INTO historical_candles (
-                        product_id, canonical_symbol, granularity, candle_open, open, high, low, close, volume, quality_state
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (c["product_id"], c["canonical_symbol"], c["granularity"], c["candle_open"], c["open"], c["high"], c["low"], c["close"], c["volume"], c["quality_state"]))
+                        product_id, canonical_symbol, granularity, candle_open, open, high, low, close, volume, quality_state,
+                        execution_product_id, market_data_product_id, market_data_is_proxy, universe_version, source_provider, source_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    c["product_id"], c["canonical_symbol"], c["granularity"], c["candle_open"], c["open"], c["high"], c["low"], c["close"], c["volume"], c["quality_state"],
+                    "BTC-USDC", "BTC-USD", 1, "v1", "coinbase", "v1"
+                ))
 
     def test_strict_no_lookahead_enforcement(self):
         """
         Blocker F / Test 12: Every data accessor MUST reject or exclude observations with timestamp >= T.
         """
-        end = self.start + timedelta(minutes=15)
+        end = self.start + timedelta(minutes=25)
         dataset = self.engine.load_dataset_from_db(["BTC/USDC"], 300, self.start, end, end)
         
         # At clock time T = start + 5 minutes, we must only see the 1st candle (open strictly before T)
@@ -78,7 +83,7 @@ class TestBacktestEngine(unittest.TestCase):
         Blocker G / H / Test 13 & 14: Replay must execute chronologically,
         and two identical runs must produce exactly the same result digest.
         """
-        end = self.start + timedelta(minutes=15)
+        end = self.start + timedelta(minutes=25)
         dataset = self.engine.load_dataset_from_db(["BTC/USDC"], 300, self.start, end, end)
         
         # Execute run 1
@@ -89,12 +94,15 @@ class TestBacktestEngine(unittest.TestCase):
         
         # Verifies that both runs produced exactly identical result digests (reproducibility!)
         self.assertEqual(res_1["result_digest"], res_2["result_digest"])
+        
+        # Blocker A7: Verify we executed exactly 1 OPEN and 1 CLOSE trade (2 trades total!)
+        self.assertEqual(res_1["trades_count"], 2)
 
     def test_config_seed_changes_digest(self):
         """
         Test 15: Different config/seed changes result digest as expected.
         """
-        end = self.start + timedelta(minutes=15)
+        end = self.start + timedelta(minutes=25)
         dataset = self.engine.load_dataset_from_db(["BTC/USDC"], 300, self.start, end, end)
         
         # Run with seed=42
@@ -103,14 +111,15 @@ class TestBacktestEngine(unittest.TestCase):
         # Run with seed=100
         res_2 = self.engine.run_backtest(dataset, initial_cash=10000.0, seed=100)
         
-        # Verifies that different seed results in a different config hash
+        # Verifies that different seed results in a different config hash and different digest (Blocker A7)
         self.assertNotEqual(res_1["config_hash"], res_2["config_hash"])
+        self.assertNotEqual(res_1["result_digest"], res_2["result_digest"])
 
     def test_backtest_storage_isolation(self):
         """
         Test 16: Backtest execution must NOT alter any PAPER runtime state or tables.
         """
-        end = self.start + timedelta(minutes=15)
+        end = self.start + timedelta(minutes=25)
         dataset = self.engine.load_dataset_from_db(["BTC/USDC"], 300, self.start, end, end)
         
         # Run backtest

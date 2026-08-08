@@ -152,6 +152,12 @@ class DatabaseConnection:
             volume REAL NOT NULL,
             ingestion_timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             quality_state TEXT NOT NULL DEFAULT 'VALID',
+            execution_product_id TEXT NOT NULL,
+            market_data_product_id TEXT NOT NULL,
+            market_data_is_proxy INTEGER NOT NULL DEFAULT 0,
+            universe_version TEXT NOT NULL DEFAULT 'v1',
+            source_provider TEXT NOT NULL DEFAULT 'coinbase',
+            source_version TEXT NOT NULL DEFAULT 'v1',
             PRIMARY KEY (product_id, granularity, candle_open)
         )""")
         cursor.execute("""
