@@ -142,7 +142,6 @@ class PortfolioEngine:
                     VALUES ('peak_equity', %s)
                     ON CONFLICT (key) DO NOTHING
                 """, (str(initial_cash_usdc),))
-                """, (str(initial_cash_usdc),))
                 
                 cur.execute("""
                     INSERT INTO portfolio_metadata (key, value) 
@@ -155,6 +154,23 @@ class PortfolioEngine:
                     VALUES ('digest', '')
                     ON CONFLICT (key) DO NOTHING
                 """)
+
+    def reset_portfolio_explicit(self, initial_cash_usdc: float):
+        """
+        Explicitly resets the portfolio to its initial cash and clears all positions (Requirement D1).
+        """
+        with self._get_db_cursor_context() as cur:
+            if self.db.use_sqlite:
+                cur.execute("DELETE FROM portfolio_cash")
+                cur.execute("DELETE FROM portfolio_positions")
+                cur.execute("DELETE FROM portfolio_allocations")
+                cur.execute("DELETE FROM portfolio_metadata")
+            else:
+                cur.execute("TRUNCATE TABLE portfolio_cash CASCADE")
+                cur.execute("TRUNCATE TABLE portfolio_positions CASCADE")
+                cur.execute("TRUNCATE TABLE portfolio_allocations CASCADE")
+                cur.execute("TRUNCATE TABLE portfolio_metadata CASCADE")
+        self.initialize_portfolio(initial_cash_usdc)
 
     def load_portfolio_snapshot(self, get_mark_func, cur=None) -> PortfolioSnapshot:
         """

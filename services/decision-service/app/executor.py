@@ -592,14 +592,17 @@ class PaperExecutor:
         """
         Set up the lane balance if not present.
         """
-        self.portfolio_engine.initialize_portfolio(initial_cash)
         conn = self.db.get_cursor()
         try:
             if self.db.use_sqlite:
-                conn.execute(
-                    "INSERT OR IGNORE INTO paper_balances (lane_id, equity, cash) VALUES (?, ?, ?)",
-                    (lane_id, initial_cash, initial_cash)
-                )
+                row = conn.execute("SELECT 1 FROM paper_balances WHERE lane_id = ?", (lane_id,)).fetchone()
+                if not row:
+                    # Brand-new lane setup! Explicitly reset portfolio cash to this requested initial cash (Requirement D1)
+                    self.portfolio_engine.reset_portfolio_explicit(initial_cash)
+                    conn.execute(
+                        "INSERT OR IGNORE INTO paper_balances (lane_id, equity, cash) VALUES (?, ?, ?)",
+                        (lane_id, initial_cash, initial_cash)
+                    )
                 conn.execute(
                     "INSERT OR IGNORE INTO arena_snapshots (lane_id, equity, cash, realized_pnl, unrealized_pnl, fees, max_drawdown_pct) "
                     "SELECT ?, ?, ?, 0.0, 0.0, 0.0, 0.0 WHERE NOT EXISTS (SELECT 1 FROM arena_snapshots WHERE lane_id = ?)",
@@ -609,11 +612,15 @@ class PaperExecutor:
             else:
                 with conn:
                     with conn.cursor() as cur:
-                        cur.execute(
-                            "INSERT INTO paper_balances (lane_id, equity, cash) VALUES (%s, %s, %s) "
-                            "ON CONFLICT (lane_id) DO NOTHING",
-                            (lane_id, initial_cash, initial_cash)
-                        )
+                        cur.execute("SELECT 1 FROM paper_balances WHERE lane_id = %s", (lane_id,))
+                        if not cur.fetchone():
+                            # Brand-new lane setup! Explicitly reset portfolio cash to this requested initial cash (Requirement D1)
+                            self.portfolio_engine.reset_portfolio_explicit(initial_cash)
+                            cur.execute(
+                                "INSERT INTO paper_balances (lane_id, equity, cash) VALUES (%s, %s, %s) "
+                                "ON CONFLICT (lane_id) DO NOTHING",
+                                (lane_id, initial_cash, initial_cash)
+                            )
                         cur.execute(
                             "INSERT INTO arena_snapshots (lane_id, equity, cash, realized_pnl, unrealized_pnl, fees, max_drawdown_pct) "
                             "SELECT %s, %s, %s, 0.0, 0.0, 0.0, 0.0 WHERE NOT EXISTS (SELECT 1 FROM arena_snapshots WHERE lane_id = %s)",
