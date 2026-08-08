@@ -190,7 +190,7 @@ class TestPortfolioPostgres(unittest.TestCase):
         self.portfolio.initialize_portfolio(1500.0)
         # Create an active position in ETH to boost total equity to 10000.0,
         # so concentration limit is 3000.0, fully allowing 1000.0 requests!
-        self.portfolio.update_position("ETH/USDC", 2.833333, 3000.0)
+        self.portfolio.update_position("ETH/USDC", 2.833334, 3000.0)
         
         marks = {"BTC/USDC": 60000.0, "ETH/USDC": 3000.0}
         get_mark = lambda sym: marks.get(sym)
@@ -320,7 +320,7 @@ class TestPortfolioPostgres(unittest.TestCase):
         self.portfolio.initialize_portfolio(1500.0)
         # Create an active position in ETH to boost total equity to 10000.0,
         # so concentration limit is 3000.0, fully allowing 1000.0 requests!
-        self.portfolio.update_position("ETH/USDC", 2.833333, 3000.0)
+        self.portfolio.update_position("ETH/USDC", 2.833334, 3000.0)
         
         marks = {"BTC/USDC": 60000.0, "ETH/USDC": 3000.0}
         get_mark = lambda s: marks.get(s)
