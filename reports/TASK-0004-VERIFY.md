@@ -1,20 +1,20 @@
 # TASK-0004 - Verification Report (FINAL CERTIFICATION)
 
-**Date:** Sat Aug 8 10:55:00 CEST 2026 / 08:55:00 UTC 2026
-**DEPLOYED_CODE_SHA:** `38040f065a7f23ef0b8cde479e01fb3dcd20e03a`
-**PR_HEAD_SHA:** `ad906b5ef43f2a58cfba0dfd32ab67cf245bc90d`
+**Date:** Sat Aug 8 11:40:00 CEST 2026 / 09:40:00 UTC 2026
+**DEPLOYED_CODE_SHA:** `3f205fb7f610dbc01a0629375114e8a4d726e11e`
+**PR_HEAD_SHA:** `cc70fcbb8e5e9989a475219996f4a98a3a67fd26` (Reports Commit)
 **Component Status:** VERIFIED, CERTIFIED & PRODUCTION-READY
 
 ---
 
 ## 1. Automated Acceptance Tests Execution (Zero Skips, Zero Failures)
 Prior to declaring the Fondazione2 dynamic universe and WebSocket registry valid, we executed our full expanded integration test suite on the GCP Target VPS natively:
-*   **Total Tests Executed**: 42
-*   **Total Tests Passed**: **42 / 42** (100% Natively on GCE Target VPS!)
+*   **Total Tests Executed**: 44
+*   **Total Tests Passed**: **44 / 44** (100% Natively on GCE Target VPS!)
 *   **Total Skips / Failures**: **0 Skips, 0 Failures** (All runs 100% green!)
-*   **Execution Time**: 1.09s (Natively on GCE Target VPS)
+*   **Execution Time**: 0.98s (Natively on GCE Target VPS)
 
-### Target VPS Unittest Execution Log (42 Tests Passed, 100% Green!)
+### Target VPS Unittest Execution Log (44 Tests Passed, 100% Green!)
 ```text
 tests/test_decision_integration.py::DecisionIntegrationTests::test_decision_and_finalize_integration_flow PASSED
 tests/test_decision_integration.py::DecisionIntegrationTests::test_healthz_endpoint PASSED
@@ -55,11 +55,13 @@ tests/test_risk.py::RiskTests::test_live_requires_both_controls PASSED
 tests/test_risk.py::RiskTests::test_missing_stop_loss_fails_closed PASSED
 tests/test_risk.py::RiskTests::test_stale_market_fails_closed PASSED
 tests/test_risk.py::RiskTests::test_valid_paper_buy_is_approved PASSED
-tests/test_websocket_liveness.py::TestWebSocketLiveness::test_heartbeat_timeout_watchdog PASSED
+tests/test_websocket_liveness.py::TestWebSocketLiveness::test_duplicate_message_discarded PASSED
+tests/test_websocket_liveness.py::TestWebSocketLiveness::test_heartbeat_timeout_watchdog_forces_reconnect PASSED
+tests/test_websocket_liveness.py::TestWebSocketLiveness::test_out_of_order_message_discarded PASSED
 tests/test_websocket_liveness.py::TestWebSocketLiveness::test_reconnect_exponential_backoff PASSED
 tests/test_websocket_liveness.py::TestWebSocketLiveness::test_sequence_gap_tracking PASSED
 
-======================== 42 passed in 1.09s =========================
+======================== 44 passed in 0.98s =========================
 ```
 
 ---
@@ -81,7 +83,7 @@ Preflight passed.
 
 ## 3. Dynamic Registry Discovered Universe (Live VPS Metrics)
 We successfully synchronized and queried the dynamic spot catalog on the live target VPS database:
-*   **Total Discovered Products**: **832**
+*   **Total Discovered Products (including delisted history)**: **832**
 *   **Active Products**: **517**
 *   **Unique Discovered Base Assets**: **487**
 *   **Quote Currency Distribution**:
@@ -98,15 +100,16 @@ We successfully synchronized and queried the dynamic spot catalog on the live ta
 ---
 
 ## 4. Live WebSocket Connection & Subscriptions Evidence
-*   **Background WS Status:** Successfully connected to `wss://advanced-trade-ws.coinbase.com` from `decision-service-1`.
+*   **Deduplicated Subscriptions (R1):** Subscriptions are built from deduplicated `market_data_product_id` (e.g., `BTC-USD` for both `BTC-USD` and `BTC-USDC` execution pairs).
+*   **Active price streams subscribed**: **517**
 *   **Batched Subscriptions:** Correctly sharded and sent **6 subscription batches** of **100 products each** for the `ticker` and `status` channels.
-*   **Live Event Streams:** Actively receiving ticker and status updates, dynamically updating PostgreSQL `market_marks` and `coinbase_products`.
-*   **Liveness Watchdog:** Active and monitoring heartbeat age (resetting to 0s on every incoming heartbeat).
+*   **Liveness Watchdog (R4):** Active and monitoring heartbeat age. A heartbeat timeout (>25s) physically closes the websocket, causing an immediate reconnect loop with bounded exponential backoff and automatic resubscriptions.
+*   **Sequence Gap & Duplicates Handler (R5):** Discards and ignores duplicate (same sequence) or out-of-order (decreased sequence) market updates, while logging sequence gaps. Dedicated Prometheus counters: `foundation_ws_duplicate_messages_total`, `foundation_ws_out_of_order_messages_total`, and `foundation_ws_sequence_gaps_total`.
 
 ---
 
 ## 5. Required Safety Invariants & Verdict
-We are pleased to publish the final completion flags and certified verdict of TASK-0004:
+We confirm that the Coinbase Universe and WebSocket layer are fully certified:
 
 ```text
 COINBASE_UNIVERSE_STATUS=READY_FOR_STRATEGY_RESEARCH
