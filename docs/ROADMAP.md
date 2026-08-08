@@ -1,129 +1,227 @@
 # Fondazione2 Roadmap
 
-## Phase 0 - Architecture bootstrap
+## Governing objective
 
-Status: `IN_PROGRESS`
+Fondazione2 must reach **ENGINE 1.0 — PRODUCTION_READY_FOR_RESEARCH** before strategy discovery, optimization, ranking, or final lane selection resumes.
 
-Deliverables:
+Strategy research is suspended until TASK-0011 is complete. Infrastructure tasks must remain PAPER-only unless a later, explicit operator authorization changes that.
 
-- agent governance;
-- safety contract;
-- architecture v0;
-- QuantDinger boundary;
-- decision/execution contracts;
-- historical regression requirements;
-- wipe gate;
-- first OpenClaw audit task.
+Permanent safety baseline until then:
 
-No VPS mutation.
+- `TRADING_MODE=paper`
+- `LIVE_ENABLED=false`
+- `LIVE_ARMED=false`
+- `REAL_ORDERS_SENT=0`
+- no Coinbase private trading credentials required
 
-## Phase 1 - Evidence and dependency pinning
+---
 
-OpenClaw TASK-0001:
+## Completed foundation
 
-- host inventory;
-- QuantDinger upstream audit and pin;
-- Kronos pin;
-- Nemotron/SGLang pin;
-- Coinbase adapter design;
-- OpenClaw capability verification.
+### TASK-0001 — Host / dependency / architecture audit — COMPLETE
+Established authoritative host identity, dependency pins, QuantDinger boundary, Coinbase adapter design, OpenClaw capabilities, historical failure catalogue, and rebuild recommendation.
 
-No VPS mutation.
+### TASK-0002 — Clean rebuild — COMPLETE
+Built and deployed the reproducible Fondazione2 runtime on the canonical `fondazione` VPS with PostgreSQL, Redis, QuantDinger, Kronos, Nemotron/SGLang, deterministic risk, Paper Executor, safety controls, and target preflight.
 
-## Phase 2 - Reproducible installer
+### TASK-0003 — Decision pipeline + realistic PAPER loop — COMPLETE
+Completed real Coinbase public market-data decision flow, canonical market snapshots, Kronos/Nemotron integration, deterministic NO_TRADE failure paths, realistic paper execution, mark-to-market, PnL/drawdown, PostgreSQL causal audit, reconciliation, and paper safety certification.
 
-Create:
+### TASK-0004 — Dynamic Coinbase SPOT universe + WebSocket normalization — COMPLETE
+Added dynamic full Coinbase SPOT discovery, normalized execution-vs-market-data identities, generic USDC→USD public-feed proxying where required, arbitrary quote preservation, resilient WebSocket ingestion, liveness/reconnect/resubscribe, sequence handling, quote-conversion eligibility, dynamic listing/status updates, and canonical mark routing.
 
-- Docker/Compose topology;
-- local secret bootstrap;
-- PostgreSQL migrations;
-- Redis topology required by QuantDinger;
-- QuantDinger pinned install;
-- Kronos service;
-- Nemotron/SGLang service;
-- Coinbase public market adapter;
-- health/readiness;
-- non-financial smoke tests;
-- installer preflight/dry-run.
+---
 
-Still no wipe until acceptance passes.
+# ENGINE 1.0 completion sequence
 
-## Phase 3 - Clean VPS rebuild
+## TASK-0005 — Canonical Data + Historical Market Data + Backtest Foundation
 
-After explicit operator gate:
+Build the canonical historical/data replay layer before any strategy research:
 
-- remove old Fondazione application state without backup;
-- clean install Fondazione2;
-- no old ledger/run/memory migration;
-- verify GPU/services/database;
-- prove `LIVE_ARMED=false`.
+- versioned PostgreSQL historical OHLCV truth;
+- dynamic full-universe Coinbase backfill;
+- restart-safe/idempotent checkpoints;
+- gap detection and targeted recovery;
+- historical/live identity continuity;
+- immutable dataset/as-of contract;
+- no-lookahead data access;
+- deterministic replay/backtest foundation;
+- isolated backtest ledger;
+- dataset/config/code provenance and reproducible digests.
 
-## Phase 4 - Decision and realistic paper core
+Completion gate:
 
-Implement:
+`ENGINE_DATA_STATUS=READY_FOR_PORTFOLIO_ENGINE`
 
-- StrategyIntent;
-- KronosForecast;
-- NemotronPolicy;
-- DecisionCandidate;
-- Deterministic Risk Engine;
-- Portfolio Allocator;
-- ExecutionIntent;
-- Paper Executor;
-- PostgreSQL event ledger;
-- price registry/freshness;
-- reconciliation/idempotency.
+## TASK-0006 — Portfolio Allocator + Multi-Asset Engine
 
-All historical failure acceptance tests must pass.
+Complete portfolio-level accounting and capital allocation independently of strategy logic:
 
-## Phase 5 - Strategy Agent laboratory
+- shared-capital multi-asset portfolio;
+- cash and quote-currency accounting;
+- exposure by asset / quote / portfolio;
+- position and concentration limits;
+- correlation/exposure hooks;
+- portfolio-level drawdown and risk budget;
+- deterministic allocator contract;
+- restart-safe portfolio reconstruction;
+- PAPER/backtest semantic parity.
 
-Implement Strategy Agent workflow and tooling:
+Completion gate:
 
-- strategy scaffolding;
-- Strategy API V2 integration;
-- test generation/execution;
+`PORTFOLIO_ENGINE_STATUS=READY_FOR_STRATEGY_RUNTIME`
+
+## TASK-0007 — Strategy Runtime API + Experiment Framework
+
+Create the stable plugin boundary strategies will later use:
+
+`CanonicalSnapshot -> StrategyPlugin -> StrategyProposal -> Allocator -> Risk -> ExecutionIntent`
+
+Include:
+
+- versioned Strategy Runtime API;
+- strategy sandboxing/bounds;
+- immutable proposal schema;
+- experiment IDs;
+- parameter/config versioning;
+- dataset/model/code provenance;
+- deterministic seeds;
+- artifact/result registry;
+- reproducible experiment manifests.
+
+No real alpha strategy selection in this task.
+
+Completion gate:
+
+`STRATEGY_RUNTIME_STATUS=READY_FOR_ORCHESTRATION`
+
+## TASK-0008 — Runtime Scheduler + Model Orchestration
+
+Make the engine capable of operating safely across the full dynamic universe:
+
+- bounded concurrency;
+- asset/job prioritization;
+- rate-limit management;
+- timeout/cancellation/recovery;
+- Kronos/Nemotron queues and batching;
+- GPU memory/health controls;
+- model version and latency tracking;
+- deterministic fallback/fail-closed behavior;
+- scheduler restart recovery;
+- no uncontrolled fan-out across hundreds of assets.
+
+Completion gate:
+
+`RUNTIME_ORCHESTRATOR_STATUS=READY_FOR_EXECUTION_1_0`
+
+## TASK-0009 — Execution Simulator 1.0 + Coinbase Constraints
+
+Finish execution semantics before strategy evaluation:
+
+- Coinbase product increments/minimums;
+- bid/ask and spread model;
+- maker/taker fee model;
+- slippage model;
+- latency;
+- partial fills;
+- reject/cancel semantics;
+- idempotent retry and reconciliation;
+- restart-safe order state;
+- paper/backtest execution parity;
+- stable interface for future live adapter.
+
+Completion gate:
+
+`EXECUTION_ENGINE_STATUS=READY_FOR_OPERATIONS`
+
+## TASK-0010 — Operations + CI/CD + Backup/Restore + Observability
+
+Turn the engine into an operable system:
+
+- database migrations;
+- pinned/reproducible deployment;
+- CI gates and regression suite;
+- service boot/restart policy;
+- PostgreSQL backup and tested restore;
+- rollback procedure;
+- logs/rotation/disk monitoring;
+- secrets handling;
+- health/readiness for every component;
+- technical control-plane/dashboard;
+- alerts for Coinbase, DB, models, queues, executions, PnL/drawdown, and stale data.
+
+Completion gate:
+
+`OPERATIONS_STATUS=READY_FOR_SOAK_CERTIFICATION`
+
+## TASK-0011 — Full-system Soak / Chaos / Restart Certification
+
+Final ENGINE 1.0 certification under realistic PAPER operation.
+
+Exercise and prove recovery from:
+
+- Coinbase disconnect/reconnect;
+- new listing/delisting;
+- container restart;
+- full VPS restart;
+- PostgreSQL transient failure;
+- Kronos failure;
+- Nemotron failure;
+- stale market data;
+- queue pressure;
+- simultaneous multi-asset operation;
+- backfill/replay interruption;
+- no duplicate execution;
+- no lost or contradictory canonical ledger state.
+
+Final engine gate:
+
+```text
+FONDAZIONE2_ENGINE_VERSION=1.0
+ENGINE_STATUS=PRODUCTION_READY_FOR_RESEARCH
+TRADING_MODE=paper
+LIVE_ENABLED=false
+LIVE_ARMED=false
+REAL_ORDERS_SENT=0
+```
+
+---
+
+# Research begins only after ENGINE 1.0
+
+## TASK-0012 — Strategy Research & Benchmarking
+
+Only after TASK-0011 passes:
+
+- candidate generation;
+- QuantDinger baseline;
+- deterministic/rule baselines;
+- Kronos-only candidates;
+- bounded Kronos+Nemotron candidates;
 - backtest;
-- benchmark;
-- ablation;
-- walk-forward/OOS;
-- paper candidate packaging;
-- deploy handoff to System Agent;
-- forward-test reporting.
+- walk-forward;
+- out-of-sample;
+- benchmark and ablation;
+- realistic Coinbase cost model;
+- paper-candidate packaging.
 
-## Phase 6 - Five strategy redesign
+The final five strategies are not predetermined.
 
-The previous five lanes are not migrated.
+## Later — Paper Arena / Forward Trial
 
-Create new candidates only after the engine is valid. Initial research families may include the strategies suggested by the historical audit, but none is canonical until independently reviewed and tested.
+Run selected candidates on the same live market, capital rules, execution engine, and observation period with immutable reporting.
 
-## Phase 7 - Paper forward trial
+## Later — Live Adapter Certification
 
-Run real-time Coinbase market data with realistic paper execution.
+Only after adequate paper evidence and a separate explicit operator decision:
 
-Requirements before scientific conclusions:
-
-- stable runtime;
-- strategy/version freeze;
-- cost model documented;
-- benchmark/ablation;
-- sufficient observation period/trade count chosen before evaluating results;
-- immutable audit data.
-
-## Phase 8 - Live adapter certification
-
-Only after paper evidence:
-
-- private Coinbase adapter integration;
+- private Coinbase adapter;
 - restricted credential model;
 - shadow execution;
-- order reconciliation;
+- reconciliation;
 - kill switch;
-- live-specific limits;
-- operator review.
+- live-specific limits.
 
-## Phase 9 - Explicit live enablement
+## Later — Explicit Live Enablement
 
-Separate task and change set.
-
-No strategy or agent may infer authorization from successful paper tests.
+Separate task and explicit human authorization. No agent may infer permission to trade real funds from successful tests or paper results.
