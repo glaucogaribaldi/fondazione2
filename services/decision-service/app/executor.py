@@ -23,6 +23,8 @@ class DatabaseConnection:
             self.sqlite_conn = sqlite3.connect(":memory:", check_same_thread=False)
             self.sqlite_conn.row_factory = sqlite3.Row
             self._init_sqlite_schema()
+        else:
+            self._init_postgres_schema()
 
     def _init_sqlite_schema(self):
         cursor = self.sqlite_conn.cursor()
@@ -113,7 +115,321 @@ class DatabaseConnection:
             max_drawdown_pct REAL NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""")
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS coinbase_products (
+            product_id TEXT PRIMARY KEY,
+            product_type TEXT NOT NULL,
+            base_currency TEXT NOT NULL,
+            quote_currency TEXT NOT NULL,
+            canonical_asset TEXT NOT NULL,
+            canonical_symbol TEXT NOT NULL,
+            execution_product_id TEXT NOT NULL,
+            market_data_product_id TEXT NOT NULL,
+            market_data_is_proxy INTEGER NOT NULL DEFAULT 0,
+            is_disabled INTEGER NOT NULL DEFAULT 0,
+            trading_disabled INTEGER NOT NULL DEFAULT 0,
+            cancel_only INTEGER NOT NULL DEFAULT 0,
+            limit_only INTEGER NOT NULL DEFAULT 0,
+            post_only INTEGER NOT NULL DEFAULT 0,
+            base_increment REAL,
+            quote_increment REAL,
+            min_market_funds REAL,
+            market_data_eligible INTEGER NOT NULL DEFAULT 1,
+            paper_execution_eligible INTEGER NOT NULL DEFAULT 1,
+            ineligibility_reason TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS historical_candles (
+            product_id TEXT NOT NULL,
+            canonical_symbol TEXT NOT NULL,
+            granularity INTEGER NOT NULL,
+            candle_open TEXT NOT NULL,
+            open REAL NOT NULL,
+            high REAL NOT NULL,
+            low REAL NOT NULL,
+            close REAL NOT NULL,
+            volume REAL NOT NULL,
+            ingestion_timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            quality_state TEXT NOT NULL DEFAULT 'VALID',
+            PRIMARY KEY (product_id, granularity, candle_open)
+        )""")
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS historical_backfill_checkpoints (
+            product_id TEXT NOT NULL,
+            granularity INTEGER NOT NULL,
+            start_time TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            last_processed_time TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PENDING',
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (product_id, granularity, start_time, end_time)
+        )""")
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS historical_gaps (
+            product_id TEXT NOT NULL,
+            granularity INTEGER NOT NULL,
+            gap_start TEXT NOT NULL,
+            gap_end TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'DETECTED',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (product_id, granularity, gap_start, gap_end)
+        )""")
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS dataset_versions (
+            dataset_id TEXT PRIMARY KEY,
+            dataset_hash TEXT NOT NULL,
+            universe_hash TEXT NOT NULL,
+            canonical_symbols TEXT NOT NULL,
+            timeframe INTEGER NOT NULL,
+            start_time TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            as_of TEXT NOT NULL,
+            preprocessing_version TEXT NOT NULL,
+            code_sha TEXT NOT NULL,
+            config_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS replay_runs (
+            run_id TEXT PRIMARY KEY,
+            dataset_id TEXT NOT NULL,
+            config_hash TEXT NOT NULL,
+            code_sha TEXT NOT NULL,
+            seed INTEGER NOT NULL,
+            fee_rate REAL NOT NULL,
+            slippage_rate REAL NOT NULL,
+            start_time TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            result_digest TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS replay_ledger (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            action TEXT NOT NULL,
+            side TEXT NOT NULL,
+            quantity REAL NOT NULL,
+            price REAL NOT NULL,
+            fee REAL NOT NULL,
+            slippage REAL NOT NULL,
+            unrealized_pnl REAL NOT NULL,
+            realized_pnl REAL NOT NULL,
+            equity REAL NOT NULL,
+            cash REAL NOT NULL,
+            timestamp TEXT NOT NULL
+        )""")
         self.sqlite_conn.commit()
+
+    def _init_postgres_schema(self):
+        try:
+            conn = psycopg2.connect(self.db_url)
+            with conn:
+                with conn.cursor() as cur:
+                    # Core pipeline tables
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS decision_audit (
+                        id BIGSERIAL PRIMARY KEY,
+                        request_id UUID NOT NULL,
+                        lane_id TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        proposed_action TEXT NOT NULL,
+                        final_action TEXT NOT NULL,
+                        approved BOOLEAN NOT NULL,
+                        reason_codes JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        model_versions JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        payload_hash TEXT NOT NULL,
+                        payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS arena_snapshots (
+                        id BIGSERIAL PRIMARY KEY,
+                        lane_id TEXT NOT NULL,
+                        equity NUMERIC(20, 8) NOT NULL,
+                        cash NUMERIC(20, 8) NOT NULL,
+                        realized_pnl NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                        unrealized_pnl NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                        fees NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                        max_drawdown_pct NUMERIC(10, 4) NOT NULL DEFAULT 0,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS paper_balances (
+                        id BIGSERIAL PRIMARY KEY,
+                        lane_id TEXT NOT NULL UNIQUE,
+                        equity NUMERIC(20, 8) NOT NULL,
+                        cash NUMERIC(20, 8) NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS paper_positions (
+                        id BIGSERIAL PRIMARY KEY,
+                        lane_id TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        quantity NUMERIC(20, 8) NOT NULL,
+                        entry_price NUMERIC(20, 8) NOT NULL,
+                        stop_loss_price NUMERIC(20, 8),
+                        take_profit_price NUMERIC(20, 8),
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        CONSTRAINT paper_positions_lane_symbol UNIQUE (lane_id, symbol)
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS execution_intents (
+                        id BIGSERIAL PRIMARY KEY,
+                        execution_intent_id UUID NOT NULL UNIQUE,
+                        risk_decision_id UUID NOT NULL,
+                        mode TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        side TEXT NOT NULL,
+                        quantity NUMERIC(20, 8) NOT NULL,
+                        order_type TEXT NOT NULL DEFAULT 'MARKET',
+                        limit_price NUMERIC(20, 8),
+                        stop_price NUMERIC(20, 8),
+                        take_profit_price NUMERIC(20, 8),
+                        time_exit_at TIMESTAMPTZ,
+                        client_order_id TEXT NOT NULL UNIQUE,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        expires_at TIMESTAMPTZ NOT NULL
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS execution_results (
+                        id BIGSERIAL PRIMARY KEY,
+                        execution_intent_id UUID NOT NULL UNIQUE REFERENCES execution_intents(execution_intent_id) ON DELETE CASCADE,
+                        broker_order_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        requested_quantity NUMERIC(20, 8) NOT NULL,
+                        filled_quantity NUMERIC(20, 8) NOT NULL,
+                        average_fill_price NUMERIC(20, 8),
+                        fee NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                        slippage NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        reason_codes JSONB NOT NULL DEFAULT '[]'::jsonb
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS market_marks (
+                        id BIGSERIAL PRIMARY KEY,
+                        symbol TEXT NOT NULL UNIQUE,
+                        price NUMERIC(20, 8) NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS coinbase_products (
+                        product_id TEXT PRIMARY KEY,
+                        product_type TEXT NOT NULL,
+                        base_currency TEXT NOT NULL,
+                        quote_currency TEXT NOT NULL,
+                        canonical_asset TEXT NOT NULL,
+                        canonical_symbol TEXT NOT NULL,
+                        execution_product_id TEXT NOT NULL,
+                        market_data_product_id TEXT NOT NULL,
+                        market_data_is_proxy BOOLEAN NOT NULL DEFAULT FALSE,
+                        is_disabled BOOLEAN NOT NULL DEFAULT FALSE,
+                        trading_disabled BOOLEAN NOT NULL DEFAULT FALSE,
+                        cancel_only BOOLEAN NOT NULL DEFAULT FALSE,
+                        limit_only BOOLEAN NOT NULL DEFAULT FALSE,
+                        post_only BOOLEAN NOT NULL DEFAULT FALSE,
+                        base_increment NUMERIC(28,10),
+                        quote_increment NUMERIC(28,10),
+                        min_market_funds NUMERIC(28,10),
+                        market_data_eligible BOOLEAN NOT NULL DEFAULT TRUE,
+                        paper_execution_eligible BOOLEAN NOT NULL DEFAULT TRUE,
+                        ineligibility_reason TEXT,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )""")
+                    
+                    # TASK-0005: Historical Market Data and Replay Engine
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS historical_candles (
+                        product_id TEXT NOT NULL,
+                        canonical_symbol TEXT NOT NULL,
+                        granularity INTEGER NOT NULL,
+                        candle_open TIMESTAMPTZ NOT NULL,
+                        open NUMERIC(28,10) NOT NULL,
+                        high NUMERIC(28,10) NOT NULL,
+                        low NUMERIC(28,10) NOT NULL,
+                        close NUMERIC(28,10) NOT NULL,
+                        volume NUMERIC(28,10) NOT NULL,
+                        ingestion_timestamp TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        quality_state TEXT NOT NULL DEFAULT 'VALID',
+                        PRIMARY KEY (product_id, granularity, candle_open)
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS historical_backfill_checkpoints (
+                        product_id TEXT NOT NULL,
+                        granularity INTEGER NOT NULL,
+                        start_time TIMESTAMPTZ NOT NULL,
+                        end_time TIMESTAMPTZ NOT NULL,
+                        last_processed_time TIMESTAMPTZ NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'PENDING',
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        PRIMARY KEY (product_id, granularity, start_time, end_time)
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS historical_gaps (
+                        product_id TEXT NOT NULL,
+                        granularity INTEGER NOT NULL,
+                        gap_start TIMESTAMPTZ NOT NULL,
+                        gap_end TIMESTAMPTZ NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'DETECTED',
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        PRIMARY KEY (product_id, granularity, gap_start, gap_end)
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS dataset_versions (
+                        dataset_id TEXT PRIMARY KEY,
+                        dataset_hash TEXT NOT NULL,
+                        universe_hash TEXT NOT NULL,
+                        canonical_symbols JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        timeframe INTEGER NOT NULL,
+                        start_time TIMESTAMPTZ NOT NULL,
+                        end_time TIMESTAMPTZ NOT NULL,
+                        as_of TIMESTAMPTZ NOT NULL,
+                        preprocessing_version TEXT NOT NULL,
+                        code_sha TEXT NOT NULL,
+                        config_hash TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS replay_runs (
+                        run_id TEXT PRIMARY KEY,
+                        dataset_id TEXT NOT NULL,
+                        config_hash TEXT NOT NULL,
+                        code_sha TEXT NOT NULL,
+                        seed INTEGER NOT NULL,
+                        fee_rate NUMERIC(10,6) NOT NULL,
+                        slippage_rate NUMERIC(10,6) NOT NULL,
+                        start_time TIMESTAMPTZ NOT NULL,
+                        end_time TIMESTAMPTZ NOT NULL,
+                        result_digest TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )""")
+                    cur.execute("""
+                    CREATE TABLE IF NOT EXISTS replay_ledger (
+                        id BIGSERIAL PRIMARY KEY,
+                        run_id TEXT NOT NULL REFERENCES replay_runs(run_id) ON DELETE CASCADE,
+                        symbol TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        side TEXT NOT NULL,
+                        quantity NUMERIC(28,10) NOT NULL,
+                        price NUMERIC(28,10) NOT NULL,
+                        fee NUMERIC(28,10) NOT NULL,
+                        slippage NUMERIC(28,10) NOT NULL,
+                        unrealized_pnl NUMERIC(28,10) NOT NULL,
+                        realized_pnl NUMERIC(28,10) NOT NULL,
+                        equity NUMERIC(28,10) NOT NULL,
+                        cash NUMERIC(28,10) NOT NULL,
+                        timestamp TIMESTAMPTZ NOT NULL
+                    )""")
+            conn.close()
+            print("Database: Unified PostgreSQL production schema checked and initialized.")
+        except Exception as e:
+            print(f"Database: PostgreSQL schema check/initialization failed: {e}")
 
     def get_cursor(self):
         if self.use_sqlite:
