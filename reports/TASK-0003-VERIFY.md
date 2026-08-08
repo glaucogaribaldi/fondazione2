@@ -1,19 +1,19 @@
 # TASK-0003 - Verification Report
 
-**Date:** Sat Aug 8 02:15:00 CEST 2026 / 00:15:00 UTC 2026
-**Commit:** `65fc641697a57e2db58275256e0263052d949d8b` (Code Commit)
+**Date:** Sat Aug 8 02:30:00 CEST 2026 / 00:30:00 UTC 2026
+**Commit:** `82da8a49d249ebe0c5955d78c39b1ec3031b3b67` (Code Commit)
 **Component Status:** VERIFIED, CERTIFIED & MERGE-READY
 
 ---
 
 ## 1. Automated Acceptance Tests Execution (Zero Skips, Zero Failures)
-Prior to declaring the Fondazione2 decision pipeline valid, we executed our fully revised integration test suite, including the new orchestrator and failure paths (Blocker K6 / L4).
-*   **Total Tests Executed**: 26 (Locally on `u50-tre`) / 24 (Natively inside container on VPS)
-*   **Total Tests Passed**: **26 / 26** (Locally) / **24 / 24** (VPS)
+Prior to declaring the Fondazione2 decision pipeline valid, we executed our fully revised integration test suite, including the new orchestrator, product mappings, and failure paths (Blocker K6 / L4 / M1 / M5 / M6).
+*   **Total Tests Executed**: 32 (Locally on `u50-tre`) / 30 (Natively inside container on VPS)
+*   **Total Tests Passed**: **32 / 32** (Locally) / **30 / 30** (VPS)
 *   **Total Skips / Failures**: **0 Skips, 0 Failures** (All runs green!)
-*   **Execution Time**: 0.85s (Local) / 0.583s (VPS)
+*   **Execution Time**: 1.16s (Local) / 5.186s (VPS)
 
-### Target VPS Unittest Execution Log (24 Tests Supered, No Skips!)
+### Target VPS Unittest Execution Log (30 Tests Supered, No Skips!)
 ```text
 test_hst_01_protection_orders_execute_when_crossed (tests.test_historical_failures.HistoricalFailuresTests.test_hst_01_protection_orders_execute_when_crossed) ... ok
 test_hst_02_postgresql_concurrency_toctou_prevention (tests.test_historical_failures.HistoricalFailuresTests.test_hst_02_postgresql_concurrency_toctou_prevention) ... ok
@@ -35,9 +35,15 @@ test_loop_approved_open_execution_end_to_end (tests.test_paper_loop.PaperLoopTes
 test_loop_stale_market_data_fails_closed (tests.test_paper_loop.PaperLoopTests.test_loop_stale_market_data_fails_closed) ... ok
 test_loop_audit_database_failure_fails_closed (tests.test_paper_loop.PaperLoopTests.test_loop_audit_database_failure_fails_closed) ... ok
 test_loop_missing_lane_fails_closed (tests.test_paper_loop.PaperLoopTests.test_loop_missing_lane_fails_closed) ... ok
+test_btc_mapping (tests.test_product_mapping.ProductMappingTests.test_btc_mapping) ... ok
+test_eth_mapping (tests.test_product_mapping.ProductMappingTests.test_eth_mapping) ... ok
+test_sol_mapping (tests.test_product_mapping.ProductMappingTests.test_sol_mapping) ... ok
+test_fallback_mapping (tests.test_product_mapping.ProductMappingTests.test_fallback_mapping) ... ok
+test_healthz_endpoint (tests.test_decision_integration.DecisionIntegrationTests.test_healthz_endpoint) ... ok
+test_decision_and_finalize_integration_flow (tests.test_decision_integration.DecisionIntegrationTests.test_decision_and_finalize_integration_flow) ... ok
 
 ----------------------------------------------------------------------
-Ran 24 tests in 0.583s
+Ran 30 tests in 5.186s
 
 OK
 ```
@@ -71,18 +77,20 @@ curl -s http://localhost:8080/healthz
 ```
 *   **Response:**
     ```json
-    {"status":"ok","trading_mode":"paper","live_enabled":false,"live_armed":false}
+    {"status":"ok","postgres":"up","trading_mode":"paper","live_enabled":false,"live_armed":false}
     ```
 *   **Result:** The baseline is confirmed running in **PAPER** mode with **LIVE disabled** and **DISARMED**. Zero private credentials are present, and zero real orders can be sent to Coinbase.
 
 ---
 
-## 5. Live Scraped Observability Metrics Evidence (Blocker K5 / L3)
-We successfully performed a metrics scrape on `/metrics` of the container on port 8080 to prove reachability and value correctness for all required signals, including corrected drawdown, fills and component reachability gauges:
+## 5. Live Scraped Observability Metrics Evidence (Blocker K5 / L3 / M3)
+We successfully performed a metrics scrape on `/metrics` of the container on port 8080 to prove reachability and value correctness for all required signals, including corrected peak-to-trough drawdown, realized/unrealized PnL, and component reachability gauges:
 ```text
 foundation_decision_latency_seconds{lane="lane_1"} 2.326915979385376
 foundation_equity{lane="lane_1"} 10000.0
 foundation_drawdown{lane="lane_1"} 0.0
+foundation_realized_pnl{lane="lane_1"} 0.0
+foundation_unrealized_pnl{lane="lane_1"} 0.0
 foundation_component_reachable{component="postgres"} 1.0
 foundation_component_reachable{component="kronos"} 1.0
 foundation_component_reachable{component="nemotron"} 1.0
@@ -90,30 +98,26 @@ foundation_component_reachable{component="nemotron"} 1.0
 
 ---
 
-## 6. QuantDinger Process-Level Read-Only Integration Evidence (Blocker K4 / L2)
-The read-only database query execution script `scripts/quantdinger_smoke.py` was executed directly inside the active **QuantDinger container** (`fondazione2-quantdinger-api-1`), validating that QuantDinger processes access the canonical state tables directly without side-effects or competing accounting ledgers:
-```text
-=== QuantDinger Read-Only Integration Smoke Check ===
-
-[1/3] Retrieving balances from paper_balances...
-Lane ID                   | Equity          | Cash            | Initialized At
---------------------------------------------------------------------------------
-lane_concurrency_test     | 1999.35         | 1899.35         | 2026-08-07 17:58:05.350237+00:00
-lane_1                    | 10000.00        | 10000.00        | 2026-08-07 23:29:38.434319+00:00
-
-[2/3] Retrieving positions from paper_positions...
-Lane ID         | Symbol     | Quantity   | Entry Price  | Stop Loss    | Take Profit 
-------------------------------------------------------------------------------------------
-lane_concurrency_test | BTC/USDC   | 1.0000     | 100.05       | None         | None        
-
-[3/3] Retrieving recent causal chains from decision_audit...
-Request ID                             | Symbol     | Proposed   | Final      | Approved | Stable SHA-256 Digest
--------------------------------------------------------------------------------------------------------------------
-62fd505f-288b-4704-931b-5543d4d0b381   | BTC/USDC   | NO_TRADE   | NO_TRADE   | True     | 1867c5e6d373...
-6015a655-61ac-478d-90ce-85600d229151   | BTC/USDC   | NO_TRADE   | NO_TRADE   | True     | 96e6430e701a...
-5a3bdfe9-eaed-4231-857f-207b7b3bb014   | BTC/USDC   | NO_TRADE   | NO_TRADE   | True     | 59334b971d89...
-
-QuantDinger integration check completed successfully!
+## 6. QuantDinger Process-Level Real Consumer Endpoint Evidence (Blocker K4 / L2 / M4)
+We successfully queried the native Flask API endpoint `/api/agent/v1/trading/canonical-ledger` hosted on port 5000 inside the active **QuantDinger container** (`fondazione2-quantdinger-api-1`), proving direct read-only query consumption of the canonical PostgreSQL ledger schema:
+```bash
+curl -s http://localhost:5000/api/agent/v1/trading/canonical-ledger
+```
+**Response:**
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "balances": [
+      {"lane_id": "lane_1", "equity": 10000.0, "cash": 10000.0, "created_at": "2026-08-07T23:29:38.434319+00:00"}
+    ],
+    "positions": [],
+    "audits": [
+      {"request_id": "8bb2ca68-857a-4613-b0da-ce39a3172e07", "symbol": "BTC/USDC", "proposed_action": "NO_TRADE", "final_action": "NO_TRADE", "approved": true, "payload_hash": "443c1f406de59dc9fd642bcc31e2c9a3a0c4d4f7bb5ed7eb01dd241cb5eb2a0e"}
+    ]
+  }
+}
 ```
 
 ---
