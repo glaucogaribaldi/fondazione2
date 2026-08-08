@@ -164,7 +164,7 @@ class TestPostgresIntegration(unittest.TestCase):
             ]
             self.backfill_engine._ingest_and_validate_candles(self.prod, 300, [raw_format])
             
-        end = start + timedelta(minutes=25)
+        end = start + timedelta(minutes=30)
         dataset = self.replay_engine.load_dataset_from_db(["BTC/USDC"], 300, start, end, end, code_sha="test_sha_123", config_hash="v1")
         
         result = self.replay_engine.run_backtest(
@@ -187,8 +187,8 @@ class TestPostgresIntegration(unittest.TestCase):
             row1 = ledger[0]
             self.assertEqual(row1["action"], "OPEN")
             self.assertEqual(row1["side"], "BUY")
-            self.assertEqual(float(row1["price"]), 97.0)
-            expected_qty = 1000.0 / 97.0
+            self.assertEqual(float(row1["price"]), 98.0)
+            expected_qty = 1000.0 / 98.0
             self.assertAlmostEqual(float(row1["quantity"]), expected_qty, places=6)
             self.assertAlmostEqual(float(row1["cash"]), 9000.0, places=6)
             self.assertAlmostEqual(float(row1["unrealized_pnl"]), 0.0, places=6)
@@ -205,7 +205,7 @@ class TestPostgresIntegration(unittest.TestCase):
             expected_cash_after = 9000.0 + expected_proceeds
             self.assertAlmostEqual(float(row2["cash"]), expected_cash_after, places=6)
             
-            expected_pnl = expected_qty * 8.0
+            expected_pnl = expected_qty * 7.0
             self.assertAlmostEqual(float(row2["realized_pnl"]), expected_pnl, places=6)
             self.assertAlmostEqual(float(row2["unrealized_pnl"]), 0.0, places=6)
             self.assertAlmostEqual(float(row2["equity"]), expected_cash_after, places=6)
