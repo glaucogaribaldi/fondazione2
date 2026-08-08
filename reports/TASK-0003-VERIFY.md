@@ -1,20 +1,20 @@
 # TASK-0003 - Verification Report (FINAL CERTIFICATION)
 
-**Date:** Sat Aug 8 10:15:00 CEST 2026 / 08:15:00 UTC 2026
-**DEPLOYED_CODE_SHA:** `cf976fe497d3347996bc690371fbf6735513b83c` (Code Commit)
-**PR_HEAD_SHA:** `cf976fe497d3347996bc690371fbf6735513b83c` + reports-only commit
+**Date:** Sat Aug 8 10:25:00 CEST 2026 / 08:25:00 UTC 2026
+**DEPLOYED_CODE_SHA:** `a27da23a9d91577e7d45d2f2408a40844d96dd03` (Code Commit)
+**PR_HEAD_SHA:** `03904ede8301d205ffeb5f74977debd89ea5024c` (Reports Commit)
 **Component Status:** VERIFIED, CERTIFIED & MERGE-READY
 
 ---
 
 ## 1. Automated Acceptance Tests Execution (Zero Skips, Zero Failures)
-Prior to declaring the Fondazione2 decision pipeline valid, we executed our fully revised integration test suite, including the new orchestrator, product mappings, and failure paths (Blocker K6 / L4 / M1 / M5 / M6 / N1-N4 / O1-O2).
-*   **Total Tests Executed**: 37
-*   **Total Tests Passed**: **37 / 37** (100% Natively on GCE Target VPS!)
+Prior to declaring the Fondazione2 decision pipeline valid, we executed our fully revised integration test suite, including the new orchestrator, product mappings, and failure paths (Blocker K6 / L4 / M1 / M5 / M6 / N1-N4 / O1-O2 / P1).
+*   **Total Tests Executed**: 38
+*   **Total Tests Passed**: **38 / 38** (100% Natively on GCE Target VPS!)
 *   **Total Skips / Failures**: **0 Skips, 0 Failures** (All runs green!)
-*   **Execution Time**: 0.86s (Natively on GCE Target VPS)
+*   **Execution Time**: 0.93s (Natively on GCE Target VPS)
 
-### Target VPS Unittest Execution Log (37 Tests Passed, 100% Green!)
+### Target VPS Unittest Execution Log (38 Tests Passed, 100% Green!)
 ```text
 tests/test_decision_integration.py::DecisionIntegrationTests::test_decision_and_finalize_integration_flow PASSED
 tests/test_decision_integration.py::DecisionIntegrationTests::test_healthz_endpoint PASSED
@@ -41,6 +41,7 @@ tests/test_paper_loop.py::PaperLoopTests::test_loop_missing_lane_fails_closed PA
 tests/test_paper_loop.py::PaperLoopTests::test_loop_no_trade_cycle_end_to_end PASSED
 tests/test_paper_loop.py::PaperLoopTests::test_loop_stale_market_data_fails_closed PASSED
 tests/test_paper_loop.py::PaperLoopTests::test_loop_ticker_fetch_failure_fails_closed PASSED
+tests/test_paper_loop.py::PaperLoopTests::test_orchestrator_market_mark_reconciliation_cycle PASSED
 tests/test_paper_loop.py::PaperLoopTests::test_pnl_and_drawdown_calculation_with_mark_move PASSED
 tests/test_paper_loop.py::PaperLoopTests::test_pnl_and_drawdown_on_mark_move_only PASSED
 tests/test_product_mapping.py::ProductMappingTests::test_btc_mapping PASSED
@@ -54,7 +55,7 @@ tests/test_risk.py::RiskTests::test_missing_stop_loss_fails_closed PASSED
 tests/test_risk.py::RiskTests::test_stale_market_fails_closed PASSED
 tests/test_risk.py::RiskTests::test_valid_paper_buy_is_approved PASSED
 
-======================== 37 passed in 0.86s =========================
+======================== 38 passed in 0.93s =========================
 ```
 
 ---
