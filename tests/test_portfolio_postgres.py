@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "services" / "decision-service"))
 from app.portfolio import PortfolioEngine, AllocationProposal, AllocationResult
 from app.products import registry, CoinbaseProduct, get_product_mapping
 from app.config import load_risk_settings, load_lane_settings
+from app.models import ExecutionIntent
 
 class TestPortfolioPostgres(unittest.TestCase):
     def setUp(self):
@@ -260,7 +261,7 @@ class TestPortfolioPostgres(unittest.TestCase):
         # Simulate active state changes (spend cash)
         with self.portfolio._get_db_cursor_context() as cur:
             cur.execute("UPDATE portfolio_cash SET cash = 9935.50 WHERE currency = 'USDC'")
-            cur.execute("INSERT INTO portfolio_positions (symbol, quantity, entry_price) VALUES ('BTC/USDC', 0.1, 60000.0)")
+            cur.execute("INSERT INTO portfolio_positions (symbol, quantity, entry_price, realized_pnl, unrealized_pnl) VALUES ('BTC/USDC', 0.1, 60000.0, 0.0, 0.0)")
 
         # Recreate engine and run initialization path again
         new_engine = PortfolioEngine(db_url=self.postgres_url)
@@ -446,11 +447,12 @@ class TestPortfolioPostgres(unittest.TestCase):
         self.portfolio.reserve_capital("alloc-xyz-2", "USDC", 1000.0)
 
         # Write ExecutionIntent linking alloc-xyz-2
+        client_ord_id = f"client-ord-xyz-{uuid.uuid4()}"
         with self.portfolio._get_db_cursor_context() as cur:
             cur.execute("""
                 INSERT INTO execution_intents (execution_intent_id, risk_decision_id, mode, symbol, action, side, quantity, order_type, client_order_id, expires_at, allocation_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (str(uuid.uuid4()), prop_id_2, "paper", "BTC/USDC", "OPEN", "BUY", 0.1, "MARKET", "client-ord-xyz", (datetime.now(UTC) + timedelta(minutes=5)).isoformat(), "alloc-xyz-2"))
+            """, (str(uuid.uuid4()), prop_id_2, "paper", "BTC/USDC", "OPEN", "BUY", 0.1, "MARKET", client_ord_id, (datetime.now(UTC) + timedelta(minutes=5)).isoformat(), "alloc-xyz-2"))
 
         # Reconcile orphan reservations
         self.portfolio.reconcile_orphan_reservations()

@@ -449,32 +449,32 @@ class PortfolioEngine:
 
     # ────────────────────────── Capital Reservation & Commits ──────────────────────────
 
-    def reserve_capital(self, allocation_id: str, currency: str, amount: float) -> bool:
+    def reserve_capital(self, allocation_id: str, currency: str, amount: float, cur=None) -> bool:
         """
         Atomically reserves the requested capital amount in the specified quote currency (Requirement #4 / #6).
         """
         currency = currency.upper()
-        with self._get_db_cursor_context() as cur:
+        with self._get_db_cursor_context(cur) as active_cur:
             if self.db.use_sqlite:
                 # SQLite locks the database on write transactions. We load and update
-                row = cur.execute("SELECT cash, reserved FROM portfolio_cash WHERE currency = ?", (currency,)).fetchone()
+                row = active_cur.execute("SELECT cash, reserved FROM portfolio_cash WHERE currency = ?", (currency,)).fetchone()
                 if not row:
                     return False
                 cash, reserved = float(row[0]), float(row[1])
                 if cash - reserved >= amount:
-                    cur.execute(
+                    active_cur.execute(
                         "UPDATE portfolio_cash SET reserved = reserved + ? WHERE currency = ?",
                         (amount, currency)
                     )
                     return True
             else:
-                cur.execute("SELECT cash, reserved FROM portfolio_cash WHERE currency = %s FOR UPDATE", (currency,))
-                row = cur.fetchone()
+                active_cur.execute("SELECT cash, reserved FROM portfolio_cash WHERE currency = %s FOR UPDATE", (currency,))
+                row = active_cur.fetchone()
                 if not row:
                     return False
                 cash, reserved = float(row["cash"]), float(row["reserved"])
                 if cash - reserved >= amount:
-                    cur.execute(
+                    active_cur.execute(
                         "UPDATE portfolio_cash SET reserved = reserved + %s WHERE currency = %s",
                         (amount, currency)
                     )
