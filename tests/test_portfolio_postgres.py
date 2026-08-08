@@ -316,7 +316,11 @@ class TestPortfolioPostgres(unittest.TestCase):
         D3: Real PostgreSQL concurrent allocations serializable conflict and retry test.
         """
         import threading
+        # Initialize with 1500.0 USDC cash
         self.portfolio.initialize_portfolio(1500.0)
+        # Create an active position in BTC to boost total equity to 10000.0,
+        # so concentration limit is 3000.0, fully allowing 1000.0 requests!
+        self.portfolio.update_position("BTC/USDC", 0.1416666, 60000.0)
         
         marks = {"BTC/USDC": 60000.0}
         get_mark = lambda s: marks.get(s)
@@ -332,7 +336,7 @@ class TestPortfolioPostgres(unittest.TestCase):
                 proposal_id=prop_id,
                 symbol="BTC/USDC",
                 action="OPEN",
-                requested_risk_fraction=0.10,
+                requested_risk_fraction=0.50, # 50% limit ($5,000)
                 requested_notional=1000.0
             )
             try:
@@ -360,7 +364,7 @@ class TestPortfolioPostgres(unittest.TestCase):
         """
         D4: Verify ADD checks subtract current exposure from capacity limit.
         """
-        self.portfolio.initialize_portfolio(10000.0)
+        self.portfolio.initialize_portfolio(20000.0)
         
         # Position exists with $4,000 value (quantity 0.066666, entry price 60000)
         self.portfolio.update_position("BTC/USDC", 0.066666, 60000.0)
@@ -371,20 +375,20 @@ class TestPortfolioPostgres(unittest.TestCase):
         risk_settings = load_risk_settings()
         _, lane_settings = load_lane_settings("lane_1")
         import dataclasses
-        # Limit to 50% max position = $5,000 limit
-        lane_settings = dataclasses.replace(lane_settings, max_position_pct=50.0)
+        # Limit to 25% max position = $6,000 limit ($24,000 total equity)
+        lane_settings = dataclasses.replace(lane_settings, max_position_pct=25.0)
 
-        # ADD of $2,000 must be scaled down to $1,000!
+        # ADD of $3,000 must be scaled down to $2,000! ($6,000 capacity - $4,000 current = $2,000)
         prop = AllocationProposal(
             proposal_id="prop-add",
             symbol="BTC/USDC",
             action="ADD",
-            requested_risk_fraction=0.20,
-            requested_notional=2000.0
+            requested_risk_fraction=0.50,
+            requested_notional=3000.0
         )
         res = self.portfolio.allocate(prop, get_mark, risk_settings, lane_settings, "test_sha")
         self.assertEqual(res.decision, "MODIFY_DOWN")
-        self.assertEqual(res.reserved_capital, 1000.0) # $5,000 - $4,000 = $1,000!
+        self.assertEqual(res.reserved_capital, 2000.0)
 
     def test_pe_09_link_allocation_execution_intent(self):
         """

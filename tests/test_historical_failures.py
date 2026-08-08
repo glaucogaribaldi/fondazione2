@@ -234,7 +234,8 @@ class HistoricalFailuresTests(unittest.TestCase):
                         time_exit_at TIMESTAMPTZ,
                         client_order_id TEXT NOT NULL UNIQUE,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        expires_at TIMESTAMPTZ NOT NULL
+                        expires_at TIMESTAMPTZ NOT NULL,
+                        allocation_id TEXT
                     )""")
                     cur.execute("""
                     CREATE TABLE execution_results (
