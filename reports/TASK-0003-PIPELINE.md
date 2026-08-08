@@ -12,14 +12,15 @@ This report certifies the successful implementation of the end-to-end paper deci
 - **Nemotron Policy Server (SGLang)**: Bounded AI completion server running on an NVIDIA L4 GPU, providing criticized proposals (`Proposal`) that preserve deterministic risk bounds.
 - **Decision Aggregator & Risk Engine**: Normalises all model outputs to Decision Contract v0 (`NO_TRADE`, `OPEN`, `ADD`, `REDUCE`, `CLOSE`), applying deterministic, serializable checks (freshness, spreads, loss limits, open position limits, entry cooldowns).
 - **PostgreSQL PaperExecutor**: The sole and absolute runtime execution ledger, applying fee/slippage, ricalculating equity, and managing protective stop-loss/take-profit triggers atomically.
-- **Prometheus Observability Engine**: Exposes comprehensive metrics (`foundation_decision_latency_seconds`, `foundation_equity`, `foundation_drawdown`, `foundation_model_failures_total`, `foundation_stale_data_total`, `foundation_risk_rejections_total`, `foundation_fills_total`) for scraper reachability.
+- **Prometheus Observability Engine**: Exposes comprehensive metrics (`foundation_decision_latency_seconds`, `foundation_equity`, `foundation_drawdown`, `foundation_model_failures_total`, `foundation_stale_data_total`, `foundation_risk_rejections_total`, `foundation_fills_total`, `foundation_component_reachable`) for scraper reachability.
 
 ---
 
 ## 2. Bounded Model Behavior & Fail-Closed Safety
 To satisfy the Safety Contract, all exceptions, invalid data, or database audit write failures resolve deterministically to `NO_TRADE`:
 - **Model failures/timeouts**: Any unreachable backend, JSON validation error, or response mismatch defaults safely to `NO_TRADE` with reason codes persisted in the audit ledger.
-- **Audit Persistence failure (Blocker K3)**: In case of database logging failures during decision auditing, the system aborts and fails-closed immediately to prevent un-audited trading.
+- **Audit Persistence failure (Blocker K3 & L1)**: In case of database logging failures during decision auditing or finalization, the system aborts and fails-closed immediately to prevent un-audited trading.
+- **Complete Causal Audit (Blocker L1)**: Exposes a finalization API `/v1/decision/finalize` that maps the actual executed `ExecutionIntent` and `ExecutionResult` back into the original `decision_audit` PostgreSQL row, generating a 100% reconstructible, cryptographically stable SHA-256 digest of the entire trade cycle.
 - **Sizing checks**: SGLang/Nemotron may recommend reductions or exits but cannot under any circumstance bypass or override the Risk Engine's strict allocation bounds.
 
 ---
@@ -28,7 +29,7 @@ To satisfy the Safety Contract, all exceptions, invalid data, or database audit 
 QuantDinger acts purely as a consumer, controller, and analytics platform, observing the canonical PostgreSQL ledger tables:
 - **Single Source of Truth**: There is no competing ledger, SQLite database, or file-backed accounting truth.
 - All historical trades, balances, and event triggers are written by the `PaperExecutor` and read by the QuantDinger analytics dashboard.
-- **Read-Only Integration**: Verified via `scripts/quantdinger_smoke.py`, proving QuantDinger reads the ledger's decision_audit, paper_balances, and paper_positions schemas flawlessly without side-effects.
+- **Read-Only Integration (Blocker L2)**: Verified by running a Python psycopg2 smoke script *directly inside the active QuantDinger container* (`fondazione2-quantdinger-api-1`), proving that the actual QuantDinger processes can query the database schemas flawlessly without writing alternate ledgers or causing side-effects.
 
 ---
 

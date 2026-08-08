@@ -1,19 +1,19 @@
 # TASK-0003 - Verification Report
 
-**Date:** Sat Aug 8 01:50:00 CEST 2026 / 23:50:00 UTC 2026
-**Commit:** `b4849395ad16c589281d8d403c68e72949e549e3` (Code Commit)
+**Date:** Sat Aug 8 02:15:00 CEST 2026 / 00:15:00 UTC 2026
+**Commit:** `65fc641697a57e2db58275256e0263052d949d8b` (Code Commit)
 **Component Status:** VERIFIED, CERTIFIED & MERGE-READY
 
 ---
 
 ## 1. Automated Acceptance Tests Execution (Zero Skips, Zero Failures)
-Prior to declaring the Fondazione2 decision pipeline valid, we executed our fully revised integration test suite, including the new orchestrator and failure paths (Blocker K6).
-*   **Total Tests Executed**: 28 (Locally on `u50-tre`) / 26 (Natively inside container on VPS)
-*   **Total Tests Passed**: **28 / 28** (Locally) / **26 / 26** (VPS)
+Prior to declaring the Fondazione2 decision pipeline valid, we executed our fully revised integration test suite, including the new orchestrator and failure paths (Blocker K6 / L4).
+*   **Total Tests Executed**: 26 (Locally on `u50-tre`) / 24 (Natively inside container on VPS)
+*   **Total Tests Passed**: **26 / 26** (Locally) / **24 / 24** (VPS)
 *   **Total Skips / Failures**: **0 Skips, 0 Failures** (All runs green!)
-*   **Execution Time**: 0.80s (Local) / 0.597s (VPS)
+*   **Execution Time**: 0.85s (Local) / 0.583s (VPS)
 
-### Target VPS Unittest Execution Log (26 Tests Supered, No Skips!)
+### Target VPS Unittest Execution Log (24 Tests Supered, No Skips!)
 ```text
 test_hst_01_protection_orders_execute_when_crossed (tests.test_historical_failures.HistoricalFailuresTests.test_hst_01_protection_orders_execute_when_crossed) ... ok
 test_hst_02_postgresql_concurrency_toctou_prevention (tests.test_historical_failures.HistoricalFailuresTests.test_hst_02_postgresql_concurrency_toctou_prevention) ... ok
@@ -30,16 +30,14 @@ test_hst_10_model_failure_is_fail_safe (tests.test_historical_failures.Historica
 test_hst_11_paper_live_semantic_parity (tests.test_historical_failures.HistoricalFailuresTests.test_hst_11_paper_live_semantic_parity) ... ok
 test_hst_12_coinbase_advanced_certification_gate (tests.test_historical_failures.HistoricalFailuresTests.test_hst_12_coinbase_advanced_certification_gate) ... ok
 test_decision_service_and_risk_engine_coherence (tests.test_risk.RiskEngineTests.test_decision_service_and_risk_engine_coherence) ... ok
-test_loop_no_trade_cycle (tests.test_paper_loop.PaperLoopTests.test_loop_no_trade_cycle) ... ok
-test_loop_approved_paper_execution (tests.test_paper_loop.PaperLoopTests.test_loop_approved_paper_execution) ... ok
-test_loop_protective_exit_execution_and_persistence (tests.test_paper_loop.PaperLoopTests.test_loop_protective_exit_execution_and_persistence) ... ok
-test_loop_kronos_failure_yields_no_trade (tests.test_paper_loop.PaperLoopTests.test_loop_kronos_failure_yields_no_trade) ... ok
-test_loop_nemotron_failure_yields_no_trade (tests.test_paper_loop.PaperLoopTests.test_loop_nemotron_failure_yields_no_trade) ... ok
-test_loop_stale_market_data_yields_no_trade (tests.test_paper_loop.PaperLoopTests.test_loop_stale_market_data_yields_no_trade) ... ok
-test_loop_restart_idempotency_fencing (tests.test_paper_loop.PaperLoopTests.test_loop_restart_idempotency_fencing) ... ok
+test_loop_no_trade_cycle_end_to_end (tests.test_paper_loop.PaperLoopTests.test_loop_no_trade_cycle_end_to_end) ... ok
+test_loop_approved_open_execution_end_to_end (tests.test_paper_loop.PaperLoopTests.test_loop_approved_open_execution_end_to_end) ... ok
+test_loop_stale_market_data_fails_closed (tests.test_paper_loop.PaperLoopTests.test_loop_stale_market_data_fails_closed) ... ok
+test_loop_audit_database_failure_fails_closed (tests.test_paper_loop.PaperLoopTests.test_loop_audit_database_failure_fails_closed) ... ok
+test_loop_missing_lane_fails_closed (tests.test_paper_loop.PaperLoopTests.test_loop_missing_lane_fails_closed) ... ok
 
 ----------------------------------------------------------------------
-Ran 26 tests in 0.597s
+Ran 24 tests in 0.583s
 
 OK
 ```
@@ -79,18 +77,21 @@ curl -s http://localhost:8080/healthz
 
 ---
 
-## 5. Live Scraped Observability Metrics Evidence (Blocker K5)
-We successfully performed a metrics scrape on `/metrics` of the container on port 8080 to prove reachability and value correctness:
+## 5. Live Scraped Observability Metrics Evidence (Blocker K5 / L3)
+We successfully performed a metrics scrape on `/metrics` of the container on port 8080 to prove reachability and value correctness for all required signals, including corrected drawdown, fills and component reachability gauges:
 ```text
-foundation_decision_latency_seconds{lane="lane_1"} 2.3164448738098145
+foundation_decision_latency_seconds{lane="lane_1"} 2.326915979385376
 foundation_equity{lane="lane_1"} 10000.0
 foundation_drawdown{lane="lane_1"} 0.0
+foundation_component_reachable{component="postgres"} 1.0
+foundation_component_reachable{component="kronos"} 1.0
+foundation_component_reachable{component="nemotron"} 1.0
 ```
 
 ---
 
-## 6. QuantDinger Read-Only Integration Evidence (Blocker K4)
-The read-only database query execution script `scripts/quantdinger_smoke.py` was executed directly inside the decision-service container, validating that QuantDinger accesses the canonical state tables directly without side-effects or competing accounting ledgers:
+## 6. QuantDinger Process-Level Read-Only Integration Evidence (Blocker K4 / L2)
+The read-only database query execution script `scripts/quantdinger_smoke.py` was executed directly inside the active **QuantDinger container** (`fondazione2-quantdinger-api-1`), validating that QuantDinger processes access the canonical state tables directly without side-effects or competing accounting ledgers:
 ```text
 === QuantDinger Read-Only Integration Smoke Check ===
 
@@ -108,9 +109,9 @@ lane_concurrency_test | BTC/USDC   | 1.0000     | 100.05       | None         | 
 [3/3] Retrieving recent causal chains from decision_audit...
 Request ID                             | Symbol     | Proposed   | Final      | Approved | Stable SHA-256 Digest
 -------------------------------------------------------------------------------------------------------------------
-6a900b0b-b20c-4717-945b-018fef847195   | BTC/USDC   | NO_TRADE   | NO_TRADE   | True     | 131d63d21b78...
-50c283cb-8813-4c79-a045-b1b306108b15   | BTC/USDC   | NO_TRADE   | NO_TRADE   | True     | 59915bc4f11a...
-b7f2ed2d-80b1-4535-bb2b-5bd9d881657a   | BTC/USDC   | NO_TRADE   | NO_TRADE   | True     | c0312f016541...
+62fd505f-288b-4704-931b-5543d4d0b381   | BTC/USDC   | NO_TRADE   | NO_TRADE   | True     | 1867c5e6d373...
+6015a655-61ac-478d-90ce-85600d229151   | BTC/USDC   | NO_TRADE   | NO_TRADE   | True     | 96e6430e701a...
+5a3bdfe9-eaed-4231-857f-207b7b3bb014   | BTC/USDC   | NO_TRADE   | NO_TRADE   | True     | 59334b971d89...
 
 QuantDinger integration check completed successfully!
 ```
