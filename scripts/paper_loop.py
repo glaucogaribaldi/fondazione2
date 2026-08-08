@@ -148,7 +148,7 @@ async def run_one_cycle(
     else:
         print("No active position or position quantity is zero.")
 
-    # 2. Fetch fresh Coinbase Advance public ticker and candles
+    # 2. Fetch market data (Primary: live WS market_marks from DB, Fallback: REST polling)
     print(f"Fetching public market data for {symbol}...")
     
     bal = executor.get_balance(lane_id)
@@ -156,22 +156,49 @@ async def run_one_cycle(
         # Blocker L5: Fail-closed if lane is missing. Do not invent capital.
         raise ValueError(f"CRITICAL SAFETY ERROR: Balance for lane '{lane_id}' does not exist in database!")
 
+    ticker = None
+    use_ws_source = False
+    
     try:
-        ticker = await adapter.get_ticker(symbol, proxy_to_usd=True)
+        db_mark = executor.get_market_mark(symbol)
+        if db_mark:
+            now = datetime.now(UTC)
+            age = (now - db_mark["updated_at"]).total_seconds()
+            is_fresh = abs(age) <= 90.0
+            if is_fresh:
+                ticker = {
+                    "product_id": symbol.replace("/", "-"),
+                    "price": db_mark["price"],
+                    "bid": db_mark["price"] * 0.9995,
+                    "ask": db_mark["price"] * 1.0005,
+                    "time": db_mark["updated_at"].isoformat(),
+                    "freshness_seconds": age,
+                    "is_fresh": True
+                }
+                use_ws_source = True
+                print(f"Market Data: Using fresh live WebSocket price from DB: {ticker['price']} (age: {ticker['freshness_seconds']:.1f}s)")
     except Exception as e:
-        print(f"Failed to fetch ticker from Coinbase: {e}. Failing closed.")
-        await _post_market_data_failure(lane_id, symbol, "TICKER_FETCH_FAILED", bal, executor, decision_service_url, headers)
-        return False
+        print(f"Market Data: Failed to query DB market mark: {e}")
 
-    print(f"Ticker price: {ticker['price']}, Fresh: {ticker['is_fresh']}, Age: {ticker['freshness_seconds']}s")
+    if not use_ws_source:
+        print("Market Data: WebSocket mark is stale or missing. Falling back to REST polling recovery path...")
+        try:
+            ticker = await adapter.get_ticker(symbol, proxy_to_usd=True)
+        except Exception as e:
+            print(f"Failed to fetch ticker from Coinbase REST: {e}. Failing closed.")
+            await _post_market_data_failure(lane_id, symbol, "TICKER_FETCH_FAILED", bal, executor, decision_service_url, headers)
+            return False
+
+    print(f"Ticker price: {ticker['price']}, Fresh: {ticker['is_fresh']}, Age: {ticker['freshness_seconds']:.1f}s")
     
     if not ticker["is_fresh"]:
-        print(f"Warning: Market data is stale! Age is {ticker['freshness_seconds']}s. Failing closed.")
+        print(f"Warning: Market data is stale! Age is {ticker['freshness_seconds']:.1f}s. Failing closed.")
         await _post_market_data_failure(lane_id, symbol, "STALE_MARKET_DATA", bal, executor, decision_service_url, headers, ticker["price"])
         return False
 
-    # Blocker P1: Update canonical market mark with validated fresh ticker price
-    executor.update_market_mark(symbol, ticker["price"])
+    # Blocker P1: Update canonical market mark with validated fresh ticker price (if not already from WS)
+    if not use_ws_source:
+        executor.update_market_mark(symbol, ticker["price"])
 
     # Re-read balance after mark update to reflect current MTM in the Decision Pipeline
     bal = executor.get_balance(lane_id)

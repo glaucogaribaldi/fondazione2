@@ -3,6 +3,7 @@ import sys
 import hashlib
 import json
 import time
+import asyncio
 from datetime import UTC, datetime
 from typing import Annotated, Any, Dict, Optional
 
@@ -15,9 +16,30 @@ from .clients import get_ai_proposal, get_forecast, quant_proposal
 from .config import load_lane_settings, load_risk_settings
 from .models import DecisionRequest, DecisionResponse, Proposal, PortfolioSnapshot
 from .risk import evaluate_risk
+from .products import registry
+from .websocket_service import websocket_service
 
 
 app = FastAPI(title="Fondazione Decision Service", version="0.1.0")
+
+@app.on_event("startup")
+async def startup_event():
+    # Force initial sync of product catalog
+    await asyncio.to_thread(registry.sync_universe)
+    # Start the unauthenticated public Advanced Trade WS Service
+    websocket_service.start()
+
+@app.get("/v1/universe/summary")
+async def get_universe_summary():
+    return registry.get_metrics_summary()
+
+@app.get("/v1/universe/products")
+async def get_universe_products(limit: int = 100):
+    products = registry.list_products()
+    return {
+        "total": len(products),
+        "products": [p.model_dump(mode="json") for p in products[:limit]]
+    }
 app.mount("/metrics", make_asgi_app())
 
 DECISIONS = Counter("foundation_decisions_total", "Decisions", ["lane", "action", "approved"])
