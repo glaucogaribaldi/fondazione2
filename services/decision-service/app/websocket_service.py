@@ -32,6 +32,7 @@ class CoinbaseWebSocketService:
         self.last_sequence_num = None
         self.executor = None
         self.ws = None
+        self.subscribed_ids = set()
         self._task = None
 
     def start(self):
@@ -80,6 +81,7 @@ class CoinbaseWebSocketService:
                     
                     # 2. Subscribe to channels in batches/shards using deduplicated market-data IDs (Blocker R1 / C)
                     await self._subscribe_all(ws, market_data_product_ids)
+                    self.subscribed_ids = set(market_data_product_ids)
 
                     # 3. Read messages
                     while self.running:
@@ -227,11 +229,26 @@ class CoinbaseWebSocketService:
 
     async def _watchdog_loop(self):
         """
-        Liveness watchdog monitoring heartbeat timeout (Blocker C / R4).
+        Liveness watchdog monitoring heartbeat timeout (Blocker C / R4)
+        and detecting new product listings in the registry to force resubscriptions (Blocker S2).
         If the heartbeat exceeds 25 seconds, it closes the connection to force reconnect.
         """
         while self.running:
             await asyncio.sleep(5)
+            
+            # Detect new listings dynamically in the registry (Blocker S2)
+            try:
+                active_products = [p for p in registry.list_products() if p.market_data_eligible]
+                current_market_ids = set([p.market_data_product_id for p in active_products if p.market_data_product_id])
+                if self.subscribed_ids:
+                    diff = current_market_ids - self.subscribed_ids
+                    if diff:
+                        print(f"WebSocket Service Watchdog: Discovered {len(diff)} new market data product IDs! Forcing reconnect to resubscribe...")
+                        if self.ws:
+                            await self.ws.close(code=4001, reason="New listings subscription refresh")
+            except Exception as e:
+                print(f"WebSocket Service Watchdog: Error checking for new listings: {e}")
+
             if self.last_heartbeat_time:
                 age = (datetime.now(UTC) - self.last_heartbeat_time).total_seconds()
                 WS_HEARTBEAT_AGE.set(age)

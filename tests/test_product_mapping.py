@@ -319,5 +319,43 @@ class ProductMappingTests(unittest.TestCase):
         rate_missing = get_conversion_rate_to_usdc("GBP", mock_get_mark)
         self.assertIsNone(rate_missing)
 
+    def test_proxy_status_isolation(self):
+        """
+        S3: Verify that status updates to the market-data proxy (e.g. BTC-USD)
+        do not overwrite execution restrictions of the execution product (e.g. BTC-USDC).
+        """
+        # Create execution product BTC-USDC
+        p_exec = CoinbaseProduct(
+            product_id="BTC-USDC",
+            product_type="SPOT",
+            base_currency="BTC",
+            quote_currency="USDC",
+            canonical_asset="BTC",
+            canonical_symbol="BTC/USDC",
+            execution_product_id="BTC-USDC",
+            market_data_product_id="BTC-USD",
+            market_data_is_proxy=True,
+            is_disabled=False,
+            trading_disabled=False,
+            cancel_only=False,
+            limit_only=False,
+            post_only=False,
+            base_increment=0.001,
+            quote_increment=0.01,
+            min_market_funds=1.0,
+            market_data_eligible=True,
+            paper_execution_eligible=True,
+            updated_at=datetime.now(UTC)
+        )
+        registry._products["BTC-USDC"] = p_exec
+
+        # Update status of proxy BTC-USD to offline / cancel_only = True / trading_disabled = True
+        registry.update_product_status("BTC-USD", {"status": "offline", "cancel_only": True, "trading_disabled": True})
+
+        # BTC-USDC should have market_data_eligible = False, but NOT trading_disabled = True or cancel_only = True!
+        self.assertFalse(p_exec.market_data_eligible)
+        self.assertFalse(p_exec.trading_disabled)
+        self.assertFalse(p_exec.cancel_only)
+
 if __name__ == "__main__":
     unittest.main()

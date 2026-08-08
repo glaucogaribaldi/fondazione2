@@ -175,20 +175,25 @@ class CoinbaseUniverseRegistry:
 
     def update_product_status(self, product_id: str, status_data: dict[str, Any]):
         """
-        Dynamically updates product specifications from WS status events. (Blocker B / C / R3)
+        Dynamically updates product specifications from WS status events. (Blocker B / C / R3 / S3)
         """
         with self._lock:
             updated = False
+            status = status_data.get("status", "online")
+            is_offline = status != "online"
+
             for p in self._products.values():
-                if p.product_id == product_id or p.market_data_product_id == product_id:
-                    status = status_data.get("status", "online")
-                    p.is_disabled = status != "online"
+                if p.product_id == product_id:
+                    # Update actual execution product restrictions
+                    p.is_disabled = is_offline
                     p.trading_disabled = status_data.get("trading_disabled", p.trading_disabled)
                     p.cancel_only = status_data.get("cancel_only", p.cancel_only)
+                    p.limit_only = status_data.get("limit_only", p.limit_only)
+                    p.post_only = status_data.get("post_only", p.post_only)
+                    p.market_data_eligible = not is_offline
                     
                     p.paper_execution_eligible = True
                     p.ineligibility_reason = None
-
                     if p.is_disabled:
                         p.paper_execution_eligible = False
                         p.ineligibility_reason = "Product is offline/disabled"
@@ -198,7 +203,14 @@ class CoinbaseUniverseRegistry:
                     elif p.cancel_only:
                         p.paper_execution_eligible = False
                         p.ineligibility_reason = "Product is cancel-only"
+                    
+                    p.updated_at = datetime.now(UTC)
+                    updated = True
 
+                elif p.market_data_product_id == product_id:
+                    # For proxies (e.g. BTC-USDC when BTC-USD changes status):
+                    # Only update market data availability/liveness, do NOT overwrite execution restrictions! (Blocker S3)
+                    p.market_data_eligible = not is_offline
                     p.updated_at = datetime.now(UTC)
                     updated = True
             

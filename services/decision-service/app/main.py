@@ -4,6 +4,7 @@ import hashlib
 import json
 import time
 import asyncio
+import sqlite3
 from datetime import UTC, datetime
 from typing import Annotated, Any, Dict, Optional
 
@@ -19,6 +20,46 @@ from .risk import evaluate_risk
 from .products import registry
 from .websocket_service import websocket_service
 
+def get_fresh_db_mark(symbol: str) -> float | None:
+    """
+    Retrieves fresh canonical market marks from the database with age validation (Blocker S1).
+    """
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url or db_url.startswith("sqlite"):
+        try:
+            conn = sqlite3.connect("file:fondazione_test?mode=memory&cache=shared", uri=True)
+            cursor = conn.cursor()
+            row = cursor.execute("SELECT price, updated_at FROM market_marks WHERE symbol = ?", (symbol,)).fetchone()
+            conn.close()
+            if row:
+                price, updated_at_str = row
+                try:
+                    updated_at = datetime.fromisoformat(updated_at_str)
+                except ValueError:
+                    updated_at = datetime.now(UTC)
+                age = (datetime.now(UTC) - updated_at).total_seconds()
+                if abs(age) <= 90.0:
+                    return float(price)
+        except Exception:
+            pass
+        return None
+
+    try:
+        conn = psycopg2.connect(db_url)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT price, updated_at FROM market_marks WHERE symbol = %s", (symbol,))
+                row = cur.fetchone()
+                if row:
+                    price, updated_at = row
+                    age = (datetime.now(UTC) - updated_at).total_seconds()
+                    if abs(age) <= 90.0:
+                        return float(price)
+        conn.close()
+    except Exception:
+        pass
+    return None
+
 
 app = FastAPI(title="Fondazione Decision Service", version="0.1.0")
 
@@ -31,7 +72,7 @@ async def startup_event():
 
 @app.get("/v1/universe/summary")
 async def get_universe_summary():
-    return registry.get_metrics_summary()
+    return registry.get_metrics_summary(get_fresh_db_mark)
 
 @app.get("/v1/universe/products")
 async def get_universe_products(limit: int = 100):
@@ -129,6 +170,29 @@ async def decide(request: DecisionRequest) -> DecisionResponse:
         
     start_time = time.time()
     lane_id = request.lane_id
+
+    # Check dynamic product eligibility before proceeding to decision (Blocker S1)
+    product_id = request.symbol.replace("/", "-")
+    p = registry.get_product(product_id)
+    if p:
+        eligible, reason = registry.get_product_eligibility(product_id, get_fresh_db_mark)
+        if not eligible:
+            print(f"Product {request.symbol} is NOT eligible: {reason}")
+            # Blocker S1: fail-closed inside decide, returning NO_TRADE with explicit reason code
+            return DecisionResponse(
+                request_id=request.request_id,
+                lane_id=request.lane_id,
+                symbol=request.symbol,
+                decision="NO_TRADE",
+                allocation_pct=0.0,
+                confidence=0.0,
+                stop_loss_pct=None,
+                take_profit_pct=None,
+                valid_until=datetime.now(UTC).isoformat(),
+                approved_by_risk_engine=False,
+                reason_codes=["PRODUCT_INELIGIBLE", reason or "Unknown reason"],
+                model_versions={"forecast": "unavailable", "decision": "unavailable"}
+            )
     
     try:
         lane, lane_settings = load_lane_settings(lane_id)
