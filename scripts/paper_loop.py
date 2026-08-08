@@ -19,6 +19,50 @@ from app.executor import PaperExecutor
 from app.coinbase_adapter import CoinbasePublicAdapter
 
 
+async def _post_market_data_failure(
+    lane_id: str,
+    symbol: str,
+    reason: str,
+    bal: dict,
+    executor: PaperExecutor,
+    decision_service_url: str,
+    headers: dict,
+    current_price: float = None
+) -> None:
+    req_id = str(uuid.uuid4())
+    pos = executor.get_position(lane_id, symbol)
+    open_pos_count = 1 if pos and pos["quantity"] > 0 else 0
+    current_pos_pct = 0.0
+    if pos and pos["quantity"] > 0 and bal["equity"] > 0:
+        price = current_price if current_price is not None else pos["entry_price"]
+        current_pos_pct = (pos["quantity"] * price / bal["equity"]) * 100.0
+        
+    portfolio_snap = PortfolioSnapshot(
+        equity=bal["equity"],
+        cash=bal["cash"],
+        daily_pnl_pct=0.0,
+        open_positions=open_pos_count,
+        current_position_pct=current_pos_pct
+    )
+    
+    print(f"Posting market data failure audit for reason: {reason}...")
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            url = f"{decision_service_url}/v1/decision/market_data_failure"
+            response = await client.post(url, json={
+                "request_id": req_id,
+                "lane_id": lane_id,
+                "symbol": symbol,
+                "reason": reason,
+                "portfolio": portfolio_snap.model_dump(mode="json")
+            }, headers=headers)
+            response.raise_for_status()
+            res_data = response.json()
+            print(f"Market data failure audit successfully saved. Stable SHA-256 Digest: {res_data.get('payload_hash')}")
+    except Exception as e:
+        print(f"CRITICAL: Failed to post market data failure audit: {e}")
+
+
 async def run_one_cycle(
     lane_id: str,
     symbol: str,
@@ -106,16 +150,24 @@ async def run_one_cycle(
 
     # 2. Fetch fresh Coinbase Advance public ticker and candles
     print(f"Fetching public market data for {symbol}...")
+    
+    bal = executor.get_balance(lane_id)
+    if not bal:
+        # Blocker L5: Fail-closed if lane is missing. Do not invent capital.
+        raise ValueError(f"CRITICAL SAFETY ERROR: Balance for lane '{lane_id}' does not exist in database!")
+
     try:
         ticker = await adapter.get_ticker(symbol, proxy_to_usd=True)
     except Exception as e:
         print(f"Failed to fetch ticker from Coinbase: {e}. Failing closed.")
+        await _post_market_data_failure(lane_id, symbol, "TICKER_FETCH_FAILED", bal, executor, decision_service_url, headers)
         return False
 
     print(f"Ticker price: {ticker['price']}, Fresh: {ticker['is_fresh']}, Age: {ticker['freshness_seconds']}s")
     
     if not ticker["is_fresh"]:
         print(f"Warning: Market data is stale! Age is {ticker['freshness_seconds']}s. Failing closed.")
+        await _post_market_data_failure(lane_id, symbol, "STALE_MARKET_DATA", bal, executor, decision_service_url, headers, ticker["price"])
         return False
 
     # Blocker M1: Strictly fail-closed on candle fetch failure. Zero synthetic fallback.
@@ -134,6 +186,7 @@ async def run_one_cycle(
             ))
     except Exception as e:
         print(f"CRITICAL ERROR: Failed to fetch candles from Coinbase: {e}. Failing closed.")
+        await _post_market_data_failure(lane_id, symbol, "CANDLES_FETCH_FAILED", bal, executor, decision_service_url, headers, ticker["price"])
         return False
 
     # 3. Construct Market & Portfolio Snapshots
@@ -144,11 +197,6 @@ async def run_one_cycle(
         candles=candles
     )
     
-    bal = executor.get_balance(lane_id)
-    if not bal:
-        # Blocker L5: Fail-closed if lane is missing. Do not invent capital.
-        raise ValueError(f"CRITICAL SAFETY ERROR: Balance for lane '{lane_id}' does not exist in database!")
-
     pos = executor.get_position(lane_id, symbol)
     open_pos_count = 1 if pos and pos["quantity"] > 0 else 0
     current_pos_pct = 0.0

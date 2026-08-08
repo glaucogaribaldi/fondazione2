@@ -126,7 +126,7 @@ class PaperLoopTests(unittest.TestCase):
     @patch("httpx.AsyncClient.post")
     def test_loop_stale_market_data_fails_closed(self, mock_post):
         """
-        L4: Test stale market data fails closed.
+        L4: Test stale market data fails closed and posts failure audit.
         """
         # Set ticker to stale
         self.adapter.get_ticker = AsyncMock(return_value={
@@ -140,20 +140,7 @@ class PaperLoopTests(unittest.TestCase):
 
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "request_id": "test-req-id-stale",
-            "lane_id": "lane_1",
-            "symbol": "BTC/USDC",
-            "decision": "NO_TRADE",
-            "allocation_pct": 0,
-            "confidence": 0,
-            "stop_loss_pct": None,
-            "take_profit_pct": None,
-            "valid_until": NOW.isoformat(),
-            "approved_by_risk_engine": False,
-            "reason_codes": ["STALE_MARKET_DATA"],
-            "model_versions": {"forecast": "v1", "decision": "v1"}
-        }
+        mock_response.json.return_value = {"status": "ok", "payload_hash": "dummy-sha256"}
         mock_post.return_value = mock_response
 
         loop = asyncio.new_event_loop()
@@ -162,9 +149,64 @@ class PaperLoopTests(unittest.TestCase):
         )
         loop.close()
 
-        # It completes successfully but decision is NO_TRADE (fails-closed)
+        # It fails closed (returns False)
         self.assertFalse(res)
-        self.assertEqual(mock_post.call_count, 0)
+        # It should post to /v1/decision/market_data_failure
+        self.assertEqual(mock_post.call_count, 1)
+        # Check that the first argument is indeed the market_data_failure endpoint
+        args, kwargs = mock_post.call_args
+        self.assertTrue(args[0].endswith("/v1/decision/market_data_failure"))
+        self.assertEqual(kwargs["json"]["reason"], "STALE_MARKET_DATA")
+
+    @patch("httpx.AsyncClient.post")
+    def test_loop_candles_fetch_failure_fails_closed(self, mock_post):
+        """
+        N1: Test candle fetch failure fails closed and posts failure audit.
+        """
+        self.adapter.get_candles = AsyncMock(side_effect=Exception("network timeout"))
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"status": "ok", "payload_hash": "dummy-sha256"}
+        mock_post.return_value = mock_response
+
+        loop = asyncio.new_event_loop()
+        res = loop.run_until_complete(
+            run_one_cycle("lane_1", "BTC/USDC", self.executor, self.adapter, "test-api-key")
+        )
+        loop.close()
+
+        # It fails closed (returns False)
+        self.assertFalse(res)
+        self.assertEqual(mock_post.call_count, 1)
+        args, kwargs = mock_post.call_args
+        self.assertTrue(args[0].endswith("/v1/decision/market_data_failure"))
+        self.assertEqual(kwargs["json"]["reason"], "CANDLES_FETCH_FAILED")
+
+    @patch("httpx.AsyncClient.post")
+    def test_loop_ticker_fetch_failure_fails_closed(self, mock_post):
+        """
+        N1: Test ticker fetch failure fails closed and posts failure audit.
+        """
+        self.adapter.get_ticker = AsyncMock(side_effect=Exception("network timeout"))
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"status": "ok", "payload_hash": "dummy-sha256"}
+        mock_post.return_value = mock_response
+
+        loop = asyncio.new_event_loop()
+        res = loop.run_until_complete(
+            run_one_cycle("lane_1", "BTC/USDC", self.executor, self.adapter, "test-api-key")
+        )
+        loop.close()
+
+        # It fails closed (returns False)
+        self.assertFalse(res)
+        self.assertEqual(mock_post.call_count, 1)
+        args, kwargs = mock_post.call_args
+        self.assertTrue(args[0].endswith("/v1/decision/market_data_failure"))
+        self.assertEqual(kwargs["json"]["reason"], "TICKER_FETCH_FAILED")
 
     @patch("httpx.AsyncClient.post")
     def test_loop_audit_database_failure_fails_closed(self, mock_post):
@@ -184,6 +226,66 @@ class PaperLoopTests(unittest.TestCase):
 
         # Should return False (fail-closed, no orders placed)
         self.assertFalse(res)
+
+    def test_pnl_and_drawdown_calculation_with_mark_move(self):
+        """
+        N2: Test that unrealized_pnl, realized_pnl, and max_drawdown_pct are computed correctly
+        under a sequence of:
+        1. OPEN a position at $100.
+        2. Move market mark down to $90 (proving non-zero unrealized PnL and drawdown).
+        3. CLOSE the position at $90 (proving non-zero realized PnL and preserving drawdown).
+        """
+        lane_id = "lane_1"
+        symbol = "BTC/USDC"
+        
+        # 1. Open position of 10 BTC/USDC @ $100
+        intent_open = ExecutionIntent(
+            execution_intent_id=str(uuid.uuid4()),
+            risk_decision_id=str(uuid.uuid4()),
+            mode="paper",
+            symbol=symbol,
+            action="OPEN",
+            side="BUY",
+            quantity=10.0,
+            stop_price=98.0,
+            take_profit_price=105.0,
+            client_order_id="order-open-pnl",
+            created_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5)
+        )
+        res_open = self.executor.execute_intent(lane_id, intent_open, 100.0)
+        self.assertEqual(res_open.status, "FILLED")
+        
+        # Let's get the snapshots from sqlite
+        cursor = self.executor.db.get_cursor()
+        snapshots = cursor.execute("SELECT equity, cash, realized_pnl, unrealized_pnl, fees, max_drawdown_pct FROM arena_snapshots WHERE lane_id = ? ORDER BY id ASC", (lane_id,)).fetchall()
+        self.assertEqual(len(snapshots), 2)
+        snap_open = snapshots[1]
+        self.assertAlmostEqual(snap_open["equity"], 9993.5)
+        self.assertAlmostEqual(snap_open["unrealized_pnl"], 0.0) # at fill, price matches entry_price
+        self.assertAlmostEqual(snap_open["fees"], 6.0)
+        self.assertGreater(snap_open["max_drawdown_pct"], 0.0)
+        
+        # 2. Move market mark down to $90 and trigger close stop
+        self.executor.update_market_mark(symbol, 90.0)
+        res_stop = self.executor.check_and_trigger_stops(lane_id, symbol, 90.0)
+        self.assertIsNotNone(res_stop)
+        self.assertEqual(res_stop.status, "FILLED")
+        
+        # Now let's fetch the snapshots again
+        snapshots_after = cursor.execute("SELECT equity, cash, realized_pnl, unrealized_pnl, fees, max_drawdown_pct FROM arena_snapshots WHERE lane_id = ? ORDER BY id ASC", (lane_id,)).fetchall()
+        self.assertEqual(len(snapshots_after), 3)
+        snap_close = snapshots_after[2]
+        
+        # Position should be closed
+        pos = self.executor.get_position(lane_id, symbol)
+        self.assertIsNone(pos)
+        
+        # Assert non-zero realized PnL
+        self.assertAlmostEqual(snap_close["unrealized_pnl"], 0.0)
+        self.assertLess(snap_close["realized_pnl"], 0.0)
+        self.assertGreater(snap_close["max_drawdown_pct"], 1.0)
+        self.assertGreater(snap_close["fees"], 6.0)
 
     def test_loop_missing_lane_fails_closed(self):
         """

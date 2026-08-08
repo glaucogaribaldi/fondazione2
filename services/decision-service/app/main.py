@@ -56,6 +56,15 @@ class ProtectiveExitRequest(BaseModel):
     portfolio: PortfolioSnapshot
 
 
+class MarketDataFailureRequest(BaseModel):
+    request_id: str
+    lane_id: str
+    symbol: str
+    reason: str  # STALE_MARKET_DATA, TICKER_FETCH_FAILED, or CANDLES_FETCH_FAILED
+    portfolio: PortfolioSnapshot
+
+
+
 def authorize(x_api_key: Annotated[str, Header()] = "") -> None:
     expected = os.getenv("DECISION_API_KEY", "")
     if not expected or x_api_key != expected:
@@ -358,6 +367,101 @@ async def record_protective_exit(request: ProtectiveExitRequest):
     return {"status": "ok", "payload_hash": payload_hash}
 
 
+@app.post("/v1/decision/market_data_failure", dependencies=[Depends(authorize)])
+async def record_market_data_failure(request: MarketDataFailureRequest):
+    """
+    Blocker N1: Canonical market data failure audit path.
+    Persists a NO_TRADE/FAILED cycle in decision_audit, increments observability counters,
+    and returns stable SHA-256 digest of the complete causal chain.
+    """
+    proposal_dict = {
+        "action": "NO_TRADE",
+        "allocation_pct": 0.0,
+        "confidence": 0.0,
+        "reason_codes": [request.reason],
+        "stop_loss_pct": None,
+        "take_profit_pct": None
+    }
+    response_dict = {
+        "request_id": request.request_id,
+        "lane_id": request.lane_id,
+        "symbol": request.symbol,
+        "decision": "NO_TRADE",
+        "allocation_pct": 0.0,
+        "confidence": 0.0,
+        "stop_loss_pct": None,
+        "take_profit_pct": None,
+        "valid_until": datetime.now(UTC).isoformat(),
+        "approved_by_risk_engine": False,
+        "reason_codes": [request.reason],
+        "model_versions": {"forecast": "n/a", "decision": "market-data-failure"}
+    }
+    
+    payload = {
+        "request": {
+            "request_id": request.request_id,
+            "lane_id": request.lane_id,
+            "symbol": request.symbol,
+            "portfolio": request.portfolio.model_dump(mode="json"),
+            "market": None
+        },
+        "forecast": None,
+        "proposal": proposal_dict,
+        "response": response_dict,
+        "execution_intent": None,
+        "execution_result": None
+    }
+    
+    payload_json = json.dumps(payload, sort_keys=True)
+    payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    
+    db_url = os.getenv("DATABASE_URL")
+    if db_url and not db_url.startswith("sqlite"):
+        try:
+            conn = psycopg2.connect(db_url)
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO decision_audit (request_id, lane_id, symbol, proposed_action, final_action, approved, reason_codes, model_versions, payload_hash, payload) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        (
+                            request.request_id,
+                            request.lane_id,
+                            request.symbol,
+                            "NO_TRADE",
+                            "NO_TRADE",
+                            False,
+                            json.dumps([request.reason]),
+                            json.dumps({"forecast": "n/a", "decision": "market-data-failure"}),
+                            payload_hash,
+                            payload_json
+                        )
+                    )
+            conn.close()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"CRITICAL SAFETY ABORT: Failed to persist market data failure audit: {e}")
+            
+    # Update Prometheus metrics
+    DECISIONS.labels(request.lane_id, "NO_TRADE", "false").inc()
+    REASONS.labels(request.lane_id, request.reason).inc()
+    if request.reason == "STALE_MARKET_DATA":
+        STALE_DATA.labels(request.lane_id).inc()
+    else:
+        MODEL_FAILURES.labels(request.lane_id, "coinbase_adapter", request.reason).inc()
+        
+    EQUITY.labels(request.lane_id).set(request.portfolio.equity)
+    
+    # Correct peak-to-trough drawdown calculation (M3)
+    peak_equity = _get_peak_equity(request.lane_id, request.portfolio.equity)
+    drawdown = ((peak_equity - request.portfolio.equity) / peak_equity) * 100.0 if peak_equity > 0 else 0.0
+    DRAWDOWN.labels(request.lane_id).set(drawdown)
+    
+    _update_pnl_metrics(request.lane_id)
+    
+    return {"status": "ok", "payload_hash": payload_hash}
+
+
+
 def _get_peak_equity(lane_id: str, current_equity: float) -> float:
     """
     Blocker M3: Calculates peak-to-trough peak equity by querying maximum historically observed equity in DB.
@@ -374,8 +478,8 @@ def _get_peak_equity(lane_id: str, current_equity: float) -> float:
                 if row and row[0] is not None:
                     return max(float(row[0]), current_equity)
         conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error in _get_peak_equity: {e}")
     return current_equity
 
 
@@ -397,8 +501,8 @@ def _update_pnl_metrics(lane_id: str):
                         realized = float(row[0] or 0.0)
                         unrealized = float(row[1] or 0.0)
             conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Database error in _update_pnl_metrics: {e}")
     REALIZED_PNL.labels(lane_id).set(realized)
     UNREALIZED_PNL.labels(lane_id).set(unrealized)
 

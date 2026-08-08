@@ -149,6 +149,7 @@ services:
       DECISION_SERVICE_URL: http://decision-service:8080
       TRADING_MODE: paper
       LIVE_ARMED: "false"
+      PYTHON_API_PORT: 8000
     depends_on:
       postgres:
         condition: service_healthy

@@ -101,6 +101,18 @@ class DatabaseConnection:
             price REAL NOT NULL,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )""")
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS arena_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lane_id TEXT NOT NULL,
+            equity REAL NOT NULL,
+            cash REAL NOT NULL,
+            realized_pnl REAL NOT NULL DEFAULT 0,
+            unrealized_pnl REAL NOT NULL DEFAULT 0,
+            fees REAL NOT NULL DEFAULT 0,
+            max_drawdown_pct REAL NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
         self.sqlite_conn.commit()
 
     def get_cursor(self):
@@ -134,6 +146,11 @@ class PaperExecutor:
                     "INSERT OR IGNORE INTO paper_balances (lane_id, equity, cash) VALUES (?, ?, ?)",
                     (lane_id, initial_cash, initial_cash)
                 )
+                conn.execute(
+                    "INSERT OR IGNORE INTO arena_snapshots (lane_id, equity, cash, realized_pnl, unrealized_pnl, fees, max_drawdown_pct) "
+                    "SELECT ?, ?, ?, 0.0, 0.0, 0.0, 0.0 WHERE NOT EXISTS (SELECT 1 FROM arena_snapshots WHERE lane_id = ?)",
+                    (lane_id, initial_cash, initial_cash, lane_id)
+                )
                 self.db.sqlite_conn.commit()
             else:
                 with conn:
@@ -142,6 +159,11 @@ class PaperExecutor:
                             "INSERT INTO paper_balances (lane_id, equity, cash) VALUES (%s, %s, %s) "
                             "ON CONFLICT (lane_id) DO NOTHING",
                             (lane_id, initial_cash, initial_cash)
+                        )
+                        cur.execute(
+                            "INSERT INTO arena_snapshots (lane_id, equity, cash, realized_pnl, unrealized_pnl, fees, max_drawdown_pct) "
+                            "SELECT %s, %s, %s, 0.0, 0.0, 0.0, 0.0 WHERE NOT EXISTS (SELECT 1 FROM arena_snapshots WHERE lane_id = %s)",
+                            (lane_id, initial_cash, initial_cash, lane_id)
                         )
         finally:
             if not self.db.use_sqlite:
@@ -435,6 +457,7 @@ class PaperExecutor:
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (intent.execution_intent_id, broker_id, "FILLED", intent.quantity, intent.quantity, adjusted_fill_price, fee, slippage_cost, json.dumps(final_reasons))
                 )
+                self._write_arena_snapshot(conn, None, lane_id, intent.symbol, adjusted_fill_price, fee, is_sqlite=True)
                 self.db.sqlite_conn.commit()
 
             else:
@@ -574,6 +597,7 @@ class PaperExecutor:
                             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                             (intent.execution_intent_id, broker_id, "FILLED", intent.quantity, intent.quantity, adjusted_fill_price, fee, slippage_cost, json.dumps(final_reasons))
                         )
+                        self._write_arena_snapshot(None, cur, lane_id, intent.symbol, adjusted_fill_price, fee, is_sqlite=False)
 
             return ExecutionResult(
                 execution_intent_id=intent.execution_intent_id,
@@ -679,6 +703,83 @@ class PaperExecutor:
             updated_at=datetime.now(UTC),
             reason_codes=final_reasons
         )
+
+    def _write_arena_snapshot(self, conn, cur, lane_id: str, symbol: str, current_price: float, fee_paid: float, is_sqlite: bool):
+        # 1. Fetch current balance
+        if is_sqlite:
+            bal_row = conn.execute("SELECT cash, equity FROM paper_balances WHERE lane_id = ?", (lane_id,)).fetchone()
+            cash = bal_row[0] if bal_row else 0.0
+            equity = bal_row[1] if bal_row else 0.0
+        else:
+            cur.execute("SELECT cash, equity FROM paper_balances WHERE lane_id = %s", (lane_id,))
+            bal_row = cur.fetchone()
+            cash = float(bal_row["cash"]) if bal_row else 0.0
+            equity = float(bal_row["equity"]) if bal_row else 0.0
+
+        # 2. Fetch all current positions
+        if is_sqlite:
+            all_pos = conn.execute("SELECT symbol, quantity, entry_price FROM paper_positions WHERE lane_id = ?", (lane_id,)).fetchall()
+            positions = [{"symbol": p[0], "quantity": p[1], "entry_price": p[2]} for p in all_pos]
+        else:
+            cur.execute("SELECT symbol, quantity, entry_price FROM paper_positions WHERE lane_id = %s", (lane_id,))
+            all_pos = cur.fetchall()
+            positions = [{"symbol": p["symbol"], "quantity": float(p["quantity"]), "entry_price": float(p["entry_price"])} for p in all_pos]
+
+        # 3. Calculate unrealized PnL
+        unrealized_pnl = 0.0
+        for p in positions:
+            if p["symbol"] == symbol:
+                price = current_price
+            else:
+                if is_sqlite:
+                    m_row = conn.execute("SELECT price FROM market_marks WHERE symbol = ?", (p["symbol"],)).fetchone()
+                    price = m_row[0] if m_row else p["entry_price"]
+                else:
+                    cur.execute("SELECT price FROM market_marks WHERE symbol = %s", (p["symbol"],))
+                    m_row = cur.fetchone()
+                    price = float(m_row["price"]) if m_row else p["entry_price"]
+            unrealized_pnl += p["quantity"] * (price - p["entry_price"])
+
+        # 4. Fetch initial cash/equity, previous fees, and historical peak equity
+        if is_sqlite:
+            first_row = conn.execute("SELECT equity FROM arena_snapshots WHERE lane_id = ? ORDER BY id ASC LIMIT 1", (lane_id,)).fetchone()
+            initial_equity = first_row[0] if first_row else equity
+            
+            last_row = conn.execute("SELECT fees FROM arena_snapshots WHERE lane_id = ? ORDER BY id DESC LIMIT 1", (lane_id,)).fetchone()
+            prev_fees = last_row[0] if last_row else 0.0
+            
+            max_row = conn.execute("SELECT MAX(equity) FROM arena_snapshots WHERE lane_id = ?", (lane_id,)).fetchone()
+            historical_peak = max(max_row[0] or 0.0, equity)
+        else:
+            cur.execute("SELECT equity FROM arena_snapshots WHERE lane_id = %s ORDER BY id ASC LIMIT 1", (lane_id,))
+            first_row = cur.fetchone()
+            initial_equity = float(first_row["equity"]) if first_row else equity
+            
+            cur.execute("SELECT fees FROM arena_snapshots WHERE lane_id = %s ORDER BY id DESC LIMIT 1", (lane_id,))
+            last_row = cur.fetchone()
+            prev_fees = float(last_row["fees"]) if last_row else 0.0
+            
+            cur.execute("SELECT MAX(equity) AS max_equity FROM arena_snapshots WHERE lane_id = %s", (lane_id,))
+            max_row = cur.fetchone()
+            historical_peak = max(float(max_row["max_equity"] or 0.0), equity)
+
+        fees = prev_fees + fee_paid
+        realized_pnl = equity - initial_equity - unrealized_pnl
+        max_drawdown_pct = ((historical_peak - equity) / historical_peak) * 100.0 if historical_peak > 0.0 else 0.0
+        if max_drawdown_pct < 0.0:
+            max_drawdown_pct = 0.0
+
+        # 5. Insert snapshot
+        if is_sqlite:
+            conn.execute(
+                "INSERT INTO arena_snapshots (lane_id, equity, cash, realized_pnl, unrealized_pnl, fees, max_drawdown_pct) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (lane_id, equity, cash, realized_pnl, unrealized_pnl, fees, max_drawdown_pct)
+            )
+        else:
+            cur.execute(
+                "INSERT INTO arena_snapshots (lane_id, equity, cash, realized_pnl, unrealized_pnl, fees, max_drawdown_pct) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (lane_id, equity, cash, realized_pnl, unrealized_pnl, fees, max_drawdown_pct)
+            )
 
 
 class CoinbaseLiveExecutor:
