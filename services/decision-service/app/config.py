@@ -6,11 +6,12 @@ import yaml
 from .risk import LaneSettings, RiskSettings
 
 
-CONFIG_DIR = Path(os.getenv("CONFIG_DIR", "/app/config"))
+def get_config_dir() -> Path:
+    return Path(os.getenv("CONFIG_DIR", "/app/config"))
 
 
 def _load_yaml(name: str) -> dict:
-    with (CONFIG_DIR / name).open(encoding="utf-8") as handle:
+    with (get_config_dir() / name).open(encoding="utf-8") as handle:
         return yaml.safe_load(handle)
 
 

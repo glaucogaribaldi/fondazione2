@@ -18,6 +18,9 @@ from .config import load_lane_settings, load_risk_settings
 from .models import DecisionRequest, DecisionResponse, Proposal, PortfolioSnapshot
 from .risk import evaluate_risk
 from .products import registry
+from .portfolio import PortfolioEngine, AllocationProposal
+
+portfolio_engine = PortfolioEngine(db_url=os.getenv("DATABASE_URL"))
 from .websocket_service import websocket_service
 
 def get_fresh_db_mark(symbol: str) -> float | None:
@@ -69,6 +72,9 @@ async def startup_event():
     await asyncio.to_thread(registry.sync_universe)
     # Start the unauthenticated public Advanced Trade WS Service
     websocket_service.start()
+    # Initialize unified shared-capital portfolio (Requirement #1 / #10)
+    portfolio_engine.initialize_portfolio(10000.0)
+    portfolio_engine.reconcile_orphan_reservations()
 
 @app.get("/v1/universe/summary")
 async def get_universe_summary():
@@ -267,6 +273,70 @@ async def decide(request: DecisionRequest) -> DecisionResponse:
             "decision": os.getenv("NEMOTRON_MODEL", "deterministic-quant"),
         }
         
+        # Resolve dynamic code SHA (Atomic Provenance C2 / TASK-0006)
+        from .backtest import get_current_code_sha
+        try:
+            code_sha = get_current_code_sha()
+        except ValueError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+        # Check Portfolio Allocator (Requirement #3 / #5)
+        alloc_id = None
+        alloc_result = None
+        if proposal.action != "NO_TRADE":
+            risk_settings = load_risk_settings()
+            snapshot = portfolio_engine.load_portfolio_snapshot(get_fresh_db_mark)
+            requested_notional = snapshot.equity * (proposal.allocation_pct / 100.0)
+            
+            alloc_proposal = AllocationProposal(
+                proposal_id=request.request_id,
+                symbol=request.symbol,
+                action=proposal.action,
+                requested_risk_fraction=proposal.allocation_pct / 100.0,
+                requested_notional=requested_notional,
+                stop_loss_pct=proposal.stop_loss_pct,
+                take_profit_pct=proposal.take_profit_pct
+            )
+            
+            alloc_result = portfolio_engine.allocate(
+                proposal=alloc_proposal,
+                get_mark_func=get_fresh_db_mark,
+                risk_settings=risk_settings,
+                lane_settings=lane_settings,
+                code_sha=code_sha
+            )
+            
+            alloc_id = alloc_result.allocation_id
+            
+            if alloc_result.decision == "REJECT":
+                fallback_proposal = Proposal(
+                    action="NO_TRADE",
+                    allocation_pct=0.0,
+                    confidence=0.0,
+                    reason_codes=["ALLOCATOR_REJECTED"] + alloc_result.reason_codes
+                )
+                fallback_response = DecisionResponse(
+                    request_id=request.request_id,
+                    lane_id=request.lane_id,
+                    symbol=request.symbol,
+                    decision="NO_TRADE",
+                    allocation_pct=0,
+                    confidence=0,
+                    stop_loss_pct=None,
+                    take_profit_pct=None,
+                    valid_until=datetime.now(UTC),
+                    approved_by_risk_engine=False,
+                    reason_codes=["ALLOCATOR_REJECTED"] + alloc_result.reason_codes,
+                    model_versions=model_versions,
+                )
+                _persist_audit(request, forecast, fallback_proposal, fallback_response, model_versions)
+                return fallback_response
+                
+            elif alloc_result.decision == "MODIFY_DOWN":
+                proposal.allocation_pct = (alloc_result.approved_notional / snapshot.equity) * 100.0 if snapshot.equity > 0.0 else 0.0
+                proposal.reason_codes.append("ALLOCATOR_MODIFIED_DOWN")
+                proposal.reason_codes.extend(alloc_result.reason_codes)
+
         result = evaluate_risk(
             request,
             proposal,
@@ -276,6 +346,13 @@ async def decide(request: DecisionRequest) -> DecisionResponse:
             live_enabled=os.getenv("LIVE_ENABLED", "false").lower() == "true",
             live_confirmation=os.getenv("LIVE_CONFIRMATION", ""),
         )
+        
+        # If risk evaluation rejected, release the reserved capital immediately
+        if not result.approved and alloc_id and alloc_result:
+            p_mapping = get_product_mapping(request.symbol)
+            quote = p_mapping.canonical_symbol.split("/")[-1].upper()
+            portfolio_engine.release_reservation(alloc_id, quote, alloc_result.reserved_capital)
+            portfolio_engine.update_allocation_status(alloc_id, "RELEASED")
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"unknown lane: {request.lane_id}") from exc
     except Exception as exc:
