@@ -390,6 +390,9 @@ class PaperLoopTests(unittest.TestCase):
         self.adapter.get_candles = AsyncMock(return_value=[
             [int(NOW.timestamp()) - i * 60, 95.0, 95.0, 95.0, 95.0, 1.0] for i in range(32)
         ])
+        
+        # Simulate WebSocket client updating DB market mark in real-time (Blocker F)
+        self.executor.update_market_mark(symbol, 95.0)
 
         # Mock Decision Service POST to return NO_TRADE (so no order execution occurs)
         mock_response = MagicMock()
