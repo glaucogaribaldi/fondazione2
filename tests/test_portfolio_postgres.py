@@ -194,6 +194,7 @@ class TestPortfolioPostgres(unittest.TestCase):
         
         risk_settings = load_risk_settings()
         _, lane_settings = load_lane_settings("lane_1")
+        lane_settings.max_position_pct = 80.0
         
         # Proposal 1: Requests 1000.0 USDC (should be approved & reserve 1000.0)
         prop1 = AllocationProposal(
