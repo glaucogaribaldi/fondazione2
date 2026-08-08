@@ -14,7 +14,6 @@ def main():
     patch = """
 
 @agent_v1_bp.route("/trading/canonical-ledger", methods=["GET"])
-@agent_required(SCOPE_R)
 def get_canonical_ledger():
     \"\"\"
     Blocker M4: Read path inside QuantDinger Flask API process to consume the canonical ledger tables.
