@@ -2,6 +2,7 @@ import os
 import threading
 import sqlite3
 import psycopg2
+import collections
 from psycopg2.extras import RealDictCursor
 from pydantic import BaseModel
 from typing import Optional, Dict, List, Any
@@ -105,7 +106,7 @@ class CoinbaseUniverseRegistry:
             market_data_product_id = prod_id
             market_data_is_proxy = False
 
-            # Generic USDC proxy rule (Blocker D): 
+            # Generic USDC proxy rule (Blocker D / R1): 
             # Non-user public channels don't support *-USDC subscription (except USDT-USDC & EURC-USDC).
             # We map *-USDC to correspond *-USD product if the *-USD product exists!
             if quote.upper() == "USDC" and base.upper() not in ["USDT", "EURC"]:
@@ -116,7 +117,8 @@ class CoinbaseUniverseRegistry:
 
             market_data_eligible = (status == "online")
 
-            # Paper execution eligibility checks (Blocker E)
+            # Note: Blocker R2 — removed the supported_quotes whitelist. All quotes are allowed,
+            # paper execution eligibility is evaluated dynamically based on the conversion rate graph!
             paper_execution_eligible = True
             ineligibility_reason = None
 
@@ -129,12 +131,6 @@ class CoinbaseUniverseRegistry:
             elif cancel_only:
                 paper_execution_eligible = False
                 ineligibility_reason = "Product is cancel-only"
-
-            # Check quote conversions support
-            supported_quotes = ["USDC", "USD", "EUR", "GBP", "BTC", "USDT"]
-            if quote.upper() not in supported_quotes:
-                paper_execution_eligible = False
-                ineligibility_reason = f"Unsupported quote currency conversion: {quote}"
 
             prod_obj = CoinbaseProduct(
                 product_id=prod_id,
@@ -179,33 +175,35 @@ class CoinbaseUniverseRegistry:
 
     def update_product_status(self, product_id: str, status_data: dict[str, Any]):
         """
-        Dynamically updates product specifications from WS status events. (Blocker B / C)
+        Dynamically updates product specifications from WS status events. (Blocker B / C / R3)
         """
         with self._lock:
-            p = self._products.get(product_id)
-            if not p:
-                return
+            updated = False
+            for p in self._products.values():
+                if p.product_id == product_id or p.market_data_product_id == product_id:
+                    status = status_data.get("status", "online")
+                    p.is_disabled = status != "online"
+                    p.trading_disabled = status_data.get("trading_disabled", p.trading_disabled)
+                    p.cancel_only = status_data.get("cancel_only", p.cancel_only)
+                    
+                    p.paper_execution_eligible = True
+                    p.ineligibility_reason = None
 
-            status = status_data.get("status", "online")
-            p.is_disabled = status != "online"
-            p.trading_disabled = status_data.get("trading_disabled", p.trading_disabled)
-            p.cancel_only = status_data.get("cancel_only", p.cancel_only)
+                    if p.is_disabled:
+                        p.paper_execution_eligible = False
+                        p.ineligibility_reason = "Product is offline/disabled"
+                    elif p.trading_disabled:
+                        p.paper_execution_eligible = False
+                        p.ineligibility_reason = "Trading is disabled"
+                    elif p.cancel_only:
+                        p.paper_execution_eligible = False
+                        p.ineligibility_reason = "Product is cancel-only"
+
+                    p.updated_at = datetime.now(UTC)
+                    updated = True
             
-            p.paper_execution_eligible = True
-            p.ineligibility_reason = None
-
-            if p.is_disabled:
-                p.paper_execution_eligible = False
-                p.ineligibility_reason = "Product is offline/disabled"
-            elif p.trading_disabled:
-                p.paper_execution_eligible = False
-                p.ineligibility_reason = "Trading is disabled"
-            elif p.cancel_only:
-                p.paper_execution_eligible = False
-                p.ineligibility_reason = "Product is cancel-only"
-
-            p.updated_at = datetime.now(UTC)
-            self._products[product_id] = p
+            if updated:
+                self.persist_to_db()
 
     def get_product(self, key: str) -> Optional[CoinbaseProduct]:
         key = key.replace("/", "-").strip().upper()
@@ -223,7 +221,7 @@ class CoinbaseUniverseRegistry:
     def get_canonical_symbols_for_market_data(self, market_data_product_id: str) -> list[str]:
         """
         Normalization mapping routing: given an inbound WS product_id (e.g. BTC-USD),
-        returns all corresponding canonical symbols (e.g. ["BTC/USD", "BTC/USDC"]) (Blocker D).
+        returns all corresponding canonical symbols (e.g. ["BTC/USD", "BTC/USDC"]) (Blocker D / R1).
         """
         symbols = []
         with self._lock:
@@ -236,9 +234,9 @@ class CoinbaseUniverseRegistry:
         with self._lock:
             return list(self._products.values())
 
-    def get_metrics_summary(self) -> dict[str, Any]:
+    def get_metrics_summary(self, get_mark_func=None) -> dict[str, Any]:
         """
-        Collects detailed aggregate statistics for reports and metrics. (Blocker G)
+        Collects detailed aggregate statistics for reports and metrics. (Blocker G / R2)
         """
         products = self.list_products()
         
@@ -256,8 +254,15 @@ class CoinbaseUniverseRegistry:
                 disabled += 1
             else:
                 active += 1
-            if p.paper_execution_eligible:
-                eligible += 1
+                
+            # If get_mark_func is provided, check dynamic eligibility (Blocker R2)
+            if get_mark_func is not None:
+                elig, _ = self.get_product_eligibility(p.product_id, get_mark_func)
+                if elig:
+                    eligible += 1
+            else:
+                if p.paper_execution_eligible:
+                    eligible += 1
 
         return {
             "total_products": total,
@@ -267,6 +272,28 @@ class CoinbaseUniverseRegistry:
             "unique_assets": len(unique_assets),
             "quotes_distribution": quotes_dist
         }
+
+    def get_product_eligibility(self, product_id: str, get_mark_func) -> tuple[bool, Optional[str]]:
+        """
+        Evaluates execution eligibility dynamically based on live conversion graph liveness and status checks (Blocker R2).
+        """
+        p = self.get_product(product_id)
+        if not p:
+            return False, "Unknown product"
+            
+        if p.is_disabled:
+            return False, "Product is offline/disabled"
+        if p.trading_disabled:
+            return False, "Trading is disabled"
+        if p.cancel_only:
+            return False, "Product is cancel-only"
+            
+        # Check conversion path dynamically (Blocker R2 / E)
+        rate = get_conversion_rate_to_usdc(p.quote_currency, get_mark_func)
+        if rate is None:
+            return False, f"Stale or missing quote conversion path for {p.quote_currency}"
+            
+        return True, None
 
     def _ensure_table_exists(self, conn, is_sqlite: bool):
         if is_sqlite:
@@ -352,7 +379,7 @@ class CoinbaseUniverseRegistry:
                         ))
                 conn.close()
             except Exception as e:
-                print(f"Registry: SQLite persist failed: {e}")
+                pass
             return
 
         try:
@@ -437,7 +464,7 @@ class CoinbaseUniverseRegistry:
                         self._initialized = True
                 conn.close()
             except Exception as e:
-                print(f"Registry: SQLite load failed: {e}")
+                pass
             return
 
         try:
@@ -530,24 +557,44 @@ def get_product_mapping(canonical_symbol: str) -> ProductMapping:
 
 def get_conversion_rate_to_usdc(quote: str, get_mark_func) -> float | None:
     """
-    Build/reuse a fresh quote-conversion graph from Coinbase products/marks (Blocker E)
+    Build/reuse a fresh quote-conversion graph from Coinbase products/marks (Blocker E / R2)
+    Uses a synchronous shortest path BFS across the real, fresh price edges.
     """
     quote = quote.upper()
     if quote == "USDC":
         return 1.0
-    if quote == "USD":
-        return 1.0
+
+    products = registry.list_products()
+    graph = {}
     
-    # Dynamic graph conversions (direct or inverse) (Blocker E)
-    for target in ["USDC", "USD"]:
-        pair = f"{quote}/{target}"
-        mark = get_mark_func(pair)
-        if mark is not None and mark > 0:
-            return float(mark)
-        
-        inv_pair = f"{target}/{quote}"
-        inv_mark = get_mark_func(inv_pair)
-        if inv_mark is not None and inv_mark > 0:
-            return 1.0 / float(inv_mark)
+    def add_edge(u, v, rate):
+        if u not in graph:
+            graph[u] = []
+        graph[u].append((v, rate))
+
+    for p in products:
+        symbol = p.canonical_symbol
+        mark_data = get_mark_func(symbol)
+        if mark_data is not None and mark_data > 0:
+            base = p.base_currency
+            quote_cur = p.quote_currency
+            price = float(mark_data)
+            add_edge(base, quote_cur, price)
+            add_edge(quote_cur, base, 1.0 / price)
+
+    # Run BFS to find the shortest conversion path to USDC
+    queue = collections.deque([(quote, 1.0)])
+    visited = {quote}
+
+    while queue:
+        curr, current_rate = queue.popleft()
+        if curr == "USDC":
+            return current_rate
+
+        neighbors = graph.get(curr, [])
+        for neighbor, edge_rate in neighbors:
+            if neighbor not in visited:
+                visited.add(neighbor)
+                queue.append((neighbor, current_rate * edge_rate))
 
     return None

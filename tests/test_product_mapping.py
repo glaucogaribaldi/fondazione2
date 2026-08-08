@@ -217,12 +217,94 @@ class ProductMappingTests(unittest.TestCase):
         """
         Test 13 & 14: Multi-quote graph conversion calculations.
         """
-        # Define mock mark function returning price of EUR/USD = 1.08, and USDC/EUR inverse
+        # Populate mock product EUR-USD in registry to provide the graph edges (Blocker R2 / E)
+        p1 = CoinbaseProduct(
+            product_id="EUR-USD",
+            product_type="SPOT",
+            base_currency="EUR",
+            quote_currency="USD",
+            canonical_asset="EUR",
+            canonical_symbol="EUR/USD",
+            execution_product_id="EUR-USD",
+            market_data_product_id="EUR-USD",
+            market_data_is_proxy=False,
+            is_disabled=False,
+            trading_disabled=False,
+            cancel_only=False,
+            limit_only=False,
+            post_only=False,
+            base_increment=0.01,
+            quote_increment=0.01,
+            min_market_funds=1.0,
+            market_data_eligible=True,
+            paper_execution_eligible=True,
+            updated_at=datetime.now(UTC)
+        )
+        registry._products["EUR-USD"] = p1
+
+        # Populate USDT-USD and USDT-USDC to bridge USD to USDC (Blocker R2 / E)
+        p2 = CoinbaseProduct(
+            product_id="USDT-USD",
+            product_type="SPOT",
+            base_currency="USDT",
+            quote_currency="USD",
+            canonical_asset="USDT",
+            canonical_symbol="USDT/USD",
+            execution_product_id="USDT-USD",
+            market_data_product_id="USDT-USD",
+            market_data_is_proxy=False,
+            is_disabled=False,
+            trading_disabled=False,
+            cancel_only=False,
+            limit_only=False,
+            post_only=False,
+            base_increment=0.1,
+            quote_increment=0.0001,
+            min_market_funds=1.0,
+            market_data_eligible=True,
+            paper_execution_eligible=True,
+            updated_at=datetime.now(UTC)
+        )
+        registry._products["USDT-USD"] = p2
+
+        p3 = CoinbaseProduct(
+            product_id="USDT-USDC",
+            product_type="SPOT",
+            base_currency="USDT",
+            quote_currency="USDC",
+            canonical_asset="USDT",
+            canonical_symbol="USDT/USDC",
+            execution_product_id="USDT-USDC",
+            market_data_product_id="USDT-USDC",
+            market_data_is_proxy=False,
+            is_disabled=False,
+            trading_disabled=False,
+            cancel_only=False,
+            limit_only=False,
+            post_only=False,
+            base_increment=0.1,
+            quote_increment=0.0001,
+            min_market_funds=1.0,
+            market_data_eligible=True,
+            paper_execution_eligible=True,
+            updated_at=datetime.now(UTC)
+        )
+        registry._products["USDT-USDC"] = p3
+
+        # Define mock mark function returning price of EUR/USD = 1.08, and stablecoin parities
         def mock_get_mark(pair: str) -> float | None:
             if pair == "EUR/USD":
                 return 1.08
             if pair == "USD/EUR":
                 return 1.0 / 1.08
+            if pair == "USDT/USD":
+                return 1.0
+            if pair == "USD/USDT":
+                return 1.0
+            if pair == "USDT/USDC":
+                return 1.0
+            if pair == "USDC/USDT":
+                return 1.0
             return None
 
         # EUR to USDC conversion
