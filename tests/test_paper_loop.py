@@ -347,6 +347,96 @@ class PaperLoopTests(unittest.TestCase):
         # Max drawdown pct should be greater because equity decreased
         self.assertGreater(snap_mark["max_drawdown_pct"], snap_open["max_drawdown_pct"])
 
+    @patch("httpx.AsyncClient.post")
+    def test_orchestrator_market_mark_reconciliation_cycle(self, mock_post):
+        """
+        P1: Test that run_one_cycle update market marks with the fresh ticker price
+        and updates current portfolio equity/drawdown before any next execution/CLOSE occurs.
+        """
+        lane_id = "lane_1"
+        symbol = "BTC/USDC"
+
+        # 1. Open a position: 10 BTC/USDC @ $100
+        intent_open = ExecutionIntent(
+            execution_intent_id=str(uuid.uuid4()),
+            risk_decision_id=str(uuid.uuid4()),
+            mode="paper",
+            symbol=symbol,
+            action="OPEN",
+            side="BUY",
+            quantity=10.0,
+            stop_price=50.0, # low stop price to avoid protective exit trigger
+            take_profit_price=200.0,
+            client_order_id="order-reconciliation-open",
+            created_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5)
+        )
+        res_open = self.executor.execute_intent(lane_id, intent_open, 100.0)
+        self.assertEqual(res_open.status, "FILLED")
+
+        # Let's verify initial snapshot and equity
+        bal_before = self.executor.get_balance(lane_id)
+        equity_before = bal_before["equity"]
+
+        # 2. Mock Coinbase adapter with a fresh ticker showing different price (e.g. $95)
+        self.adapter.get_ticker = AsyncMock(return_value={
+            "price": 95.0,
+            "bid": 94.9,
+            "ask": 95.1,
+            "time": NOW.isoformat(),
+            "is_fresh": True,
+            "freshness_seconds": 1
+        })
+        self.adapter.get_candles = AsyncMock(return_value=[
+            [int(NOW.timestamp()) - i * 60, 95.0, 95.0, 95.0, 95.0, 1.0] for i in range(32)
+        ])
+
+        # Mock Decision Service POST to return NO_TRADE (so no order execution occurs)
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "request_id": "test-req-reconciliation",
+            "lane_id": lane_id,
+            "symbol": symbol,
+            "decision": "NO_TRADE",
+            "allocation_pct": 0.0,
+            "confidence": 0.5,
+            "stop_loss_pct": None,
+            "take_profit_pct": None,
+            "valid_until": NOW.isoformat(),
+            "approved_by_risk_engine": True,
+            "reason_codes": ["FLAT_MARKET"],
+            "model_versions": {"forecast": "v1", "decision": "v1"}
+        }
+        mock_post.return_value = mock_response
+
+        # 3. Execute run_one_cycle()
+        loop = asyncio.new_event_loop()
+        res = loop.run_until_complete(
+            run_one_cycle(lane_id, symbol, self.executor, self.adapter, "test-api-key")
+        )
+        loop.close()
+
+        self.assertTrue(res)
+
+        # 4. Verify equity has decreased by $50 (10 BTC * ($100 - $95))
+        bal_after = self.executor.get_balance(lane_id)
+        self.assertAlmostEqual(bal_after["equity"], equity_before - 50.0)
+
+        # 5. Verify latest arena snapshot unrealized PnL is updated (-50.5 due to slippage of 0.5 + 50.0 mark move)
+        cursor = self.executor.db.get_cursor()
+        snapshots = cursor.execute(
+            "SELECT equity, cash, realized_pnl, unrealized_pnl, max_drawdown_pct "
+            "FROM arena_snapshots WHERE lane_id = ? ORDER BY id ASC", (lane_id,)
+        ).fetchall()
+        
+        self.assertGreaterEqual(len(snapshots), 3)
+        snap_reconciliation = snapshots[-1]
+        
+        self.assertAlmostEqual(snap_reconciliation["unrealized_pnl"], -50.5) # slippage 0.5 + mark loss 50.0 = 50.5
+        self.assertAlmostEqual(snap_reconciliation["equity"], equity_before - 50.0)
+        self.assertGreater(snap_reconciliation["max_drawdown_pct"], 0.0)
+
     def test_loop_missing_lane_fails_closed(self):
         """
         L5: Test that run_one_cycle fails closed if the lane is not pre-initialized.

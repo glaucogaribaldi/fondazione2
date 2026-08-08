@@ -170,6 +170,14 @@ async def run_one_cycle(
         await _post_market_data_failure(lane_id, symbol, "STALE_MARKET_DATA", bal, executor, decision_service_url, headers, ticker["price"])
         return False
 
+    # Blocker P1: Update canonical market mark with validated fresh ticker price
+    executor.update_market_mark(symbol, ticker["price"])
+
+    # Re-read balance after mark update to reflect current MTM in the Decision Pipeline
+    bal = executor.get_balance(lane_id)
+    if not bal:
+        raise ValueError(f"CRITICAL SAFETY ERROR: Balance for lane '{lane_id}' does not exist in database!")
+
     # Blocker M1: Strictly fail-closed on candle fetch failure. Zero synthetic fallback.
     try:
         raw_candles = await adapter.get_candles(symbol, granularity=60, proxy_to_usd=True)

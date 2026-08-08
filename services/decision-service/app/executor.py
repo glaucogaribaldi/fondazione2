@@ -197,14 +197,14 @@ class PaperExecutor:
                         bal_row = conn.execute("SELECT cash FROM paper_balances WHERE lane_id = ?", (lane_id,)).fetchone()
                         if bal_row:
                             cash = bal_row[0]
-                            all_pos = conn.execute("SELECT symbol, quantity FROM paper_positions WHERE lane_id = ?", (lane_id,)).fetchall()
+                            all_pos = conn.execute("SELECT symbol, quantity, entry_price FROM paper_positions WHERE lane_id = ?", (lane_id,)).fetchall()
                             mtm_value = 0.0
-                            for p_sym, p_qty in all_pos:
+                            for p_sym, p_qty, p_entry in all_pos:
                                 if p_sym == symbol:
                                     m_price = price
                                 else:
                                     m_row = conn.execute("SELECT price FROM market_marks WHERE symbol = ?", (p_sym,)).fetchone()
-                                    m_price = m_row[0] if m_row else 0.0
+                                    m_price = m_row[0] if m_row else p_entry
                                 mtm_value += p_qty * m_price
                             new_equity = cash + mtm_value
                             conn.execute("UPDATE paper_balances SET equity = ? WHERE lane_id = ?", (new_equity, lane_id))
@@ -237,18 +237,19 @@ class PaperExecutor:
                                 bal_row = cur.fetchone()
                                 if bal_row:
                                     cash = float(bal_row["cash"])
-                                    cur.execute("SELECT symbol, quantity FROM paper_positions WHERE lane_id = %s", (lane_id,))
+                                    cur.execute("SELECT symbol, quantity, entry_price FROM paper_positions WHERE lane_id = %s", (lane_id,))
                                     all_pos = cur.fetchall()
                                     mtm_value = 0.0
                                     for p in all_pos:
                                         p_sym = p["symbol"]
                                         p_qty = float(p["quantity"])
+                                        p_entry = float(p["entry_price"])
                                         if p_sym == symbol:
                                             m_price = price
                                         else:
                                             cur.execute("SELECT price FROM market_marks WHERE symbol = %s", (p_sym,))
                                             m_row = cur.fetchone()
-                                            m_price = float(m_row["price"]) if m_row else 0.0
+                                            m_price = float(m_row["price"]) if m_row else p_entry
                                         mtm_value += p_qty * m_price
                                     new_equity = cash + mtm_value
                                     cur.execute("UPDATE paper_balances SET equity = %s WHERE lane_id = %s", (new_equity, lane_id))
