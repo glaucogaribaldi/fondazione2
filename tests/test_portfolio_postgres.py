@@ -492,5 +492,242 @@ class TestPortfolioPostgres(unittest.TestCase):
         self.assertEqual(res.decision, "MODIFY_DOWN")
         self.assertEqual(res.reserved_capital, 10000.0 * 0.01) # exactly 100.0!
 
+    def test_pe_11_lane_setup_no_destructive_reset(self):
+        """
+        E1: Verify that initializing a new lane does NOT reset or mutate the existing global portfolio.
+        """
+        self.portfolio.initialize_portfolio(5000.0)
+        self.portfolio.update_position("BTC/USDC", 0.1, 50000.0)
+        self.portfolio.reserve_capital("alloc-dummy", "USDC", 500.0)
+
+        get_mark = lambda s: 50000.0
+        snap_before = self.portfolio.load_portfolio_snapshot(get_mark)
+
+        # Initialize a new lane using PaperExecutor (which uses initialize_lane)
+        from app.executor import PaperExecutor
+        pg_url = os.getenv("TEST_POSTGRES_URL")
+        if not pg_url:
+            self.skipTest("TEST_POSTGRES_URL is required to run real Postgres E1 test")
+            
+        executor = PaperExecutor(db_url=pg_url)
+        executor.initialize_lane("new_test_lane", 10000.0)
+
+        # Reload snapshot and verify it is completely identical
+        snap_after = self.portfolio.load_portfolio_snapshot(get_mark)
+        self.assertEqual(snap_after.equity, snap_before.equity)
+        self.assertEqual(snap_after.digest, snap_before.digest)
+        self.assertEqual(snap_after.cash.get("USDC"), 5000.0)
+        self.assertEqual(snap_after.reserved.get("USDC"), 500.0)
+        self.assertEqual(snap_after.positions["BTC/USDC"]["quantity"], 0.1)
+
+    def test_pe_12_concurrent_risk_budget_consumption_multi_quote(self):
+        """
+        E2: Verify that PENDING allocations consume risk budget, gross exposure, and concentration limits.
+        """
+        self.portfolio.initialize_portfolio(10000.0)
+        
+        # We manually insert a PENDING allocation on BTC/USDC
+        with self.portfolio._get_db_cursor_context() as cur:
+            self.portfolio._persist_allocation_audit_tx(
+                cur,
+                allocation_id="alloc-pending-btc",
+                proposal_id="prop-pending-btc",
+                symbol="BTC/USDC",
+                action="OPEN",
+                req_risk=0.40,
+                app_risk=0.40,
+                req_notional=4000.0,
+                app_notional=4000.0,
+                reserved=4000.0,
+                status="PENDING",
+                reason_codes=[],
+                port_version=1,
+                port_digest="",
+                marks_provenance={},
+                config_hash="v1",
+                code_sha="test_sha"
+            )
+        self.portfolio.reserve_capital("alloc-pending-btc", "USDC", 4000.0)
+
+        get_mark = lambda s: 50000.0
+        snap = self.portfolio.load_portfolio_snapshot(get_mark)
+        
+        # Pending allocation of $4,000 must be included in gross exposure and risk budget!
+        self.assertEqual(snap.gross_exposure, 4000.0)
+        self.assertEqual(snap.risk_budget_consumed, 0.40)
+        self.assertEqual(snap.concentration, 40.0) # 4000 / 10000 * 100
+
+        # Now, try to allocate another proposal of $7,000.
+        # Since $4,000 is already pending, remaining gross exposure is $50,000 - $4,000 = $46,000.
+        # But our maximum allowed position pct is 80% ($8,000).
+        # And our symbol concentration is capped at 30% of equity ($3,000).
+        # Since BTC already has $4,000 pending, the concentration limit ($3,000) is exceeded!
+        # So a new OPEN for BTC/USDC should be modified down to $0.0 (below min notional) or scaled down to $0.0!
+        risk_settings = load_risk_settings()
+        _, lane_settings = load_lane_settings("lane_1")
+        
+        prop = AllocationProposal(
+            proposal_id="prop-new-btc",
+            symbol="BTC/USDC",
+            action="OPEN",
+            requested_risk_fraction=0.30,
+            requested_notional=3000.0
+        )
+        res = self.portfolio.allocate(prop, get_mark, risk_settings, lane_settings, "test_sha")
+        self.assertEqual(res.decision, "REJECT")
+        self.assertIn("BELOW_MINIMUM_NOTIONAL", res.reason_codes)
+
+    def test_pe_13_single_transactional_boundary_failure_injection(self):
+        """
+        E3: Verify PostgreSQL single transactional boundary and failure injection rollback.
+        """
+        pg_url = os.getenv("TEST_POSTGRES_URL")
+        if not pg_url:
+            self.skipTest("TEST_POSTGRES_URL is required to run real Postgres E3 test")
+
+        from app.executor import PaperExecutor
+        executor = PaperExecutor(db_url=pg_url)
+        executor.initialize_lane("failure_lane", 5000.0)
+        executor.portfolio_engine.initialize_portfolio(5000.0)
+
+        # Create a mock pending allocation
+        alloc_id = str(uuid.uuid4())
+        with executor.portfolio_engine._get_db_cursor_context() as cur:
+            executor.portfolio_engine._persist_allocation_audit_tx(
+                cur,
+                allocation_id=alloc_id,
+                proposal_id="prop-err-inj",
+                symbol="BTC/USDC",
+                action="OPEN",
+                req_risk=0.10,
+                app_risk=0.10,
+                req_notional=500.0,
+                app_notional=500.0,
+                reserved=500.0,
+                status="PENDING",
+                reason_codes=[],
+                port_version=1,
+                port_digest="",
+                marks_provenance={},
+                config_hash="v1",
+                code_sha="test_sha"
+            )
+            cur.execute("INSERT INTO portfolio_cash (currency, cash, reserved) VALUES ('USDC', 5000.0, 500.0) ON CONFLICT (currency) DO NOTHING")
+
+        intent = ExecutionIntent(
+            execution_intent_id=str(uuid.uuid4()),
+            risk_decision_id="prop-err-inj",
+            mode="paper",
+            symbol="BTC/USDC",
+            action="OPEN",
+            side="BUY",
+            quantity=0.01,
+            client_order_id="client-err-inj-id",
+            created_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            allocation_id=alloc_id
+        )
+
+        # Enable failure injection
+        executor._test_failure_injection = True
+
+        with self.assertRaises(RuntimeError):
+            executor.execute_intent("failure_lane", intent, 50000.0)
+
+        # Verify that the entire transaction rolled back and there is NO partial divergence!
+        with executor.portfolio_engine._get_db_cursor_context() as cur:
+            # Table paper_positions must be empty for this symbol
+            cur.execute("SELECT COUNT(*) as count FROM paper_positions WHERE lane_id = 'failure_lane'")
+            self.assertEqual(cur.fetchone()["count"], 0)
+
+            # Table portfolio_allocations must remain PENDING (not COMMITTED)
+            cur.execute("SELECT status FROM portfolio_allocations WHERE allocation_id = %s", (alloc_id,))
+            self.assertEqual(cur.fetchone()["status"], "PENDING")
+
+            # Table execution_intents must NOT contain this intent_id
+            cur.execute("SELECT COUNT(*) as count FROM execution_intents WHERE execution_intent_id = %s", (intent.execution_intent_id,))
+            self.assertEqual(cur.fetchone()["count"], 0)
+
+    def test_pe_14_non_usdc_quote_execution_exact_notional(self):
+        """
+        E4: Verify non-USDC pair (BTC/EUR) quote execution, exact notional spending, and cash protection.
+        """
+        pg_url = os.getenv("TEST_POSTGRES_URL")
+        if not pg_url:
+            self.skipTest("TEST_POSTGRES_URL is required to run real Postgres E4 test")
+
+        from app.executor import PaperExecutor
+        executor = PaperExecutor(db_url=pg_url)
+        executor.initialize_lane("eur_lane", 5000.0)
+        executor.portfolio_engine.initialize_portfolio(5000.0)
+
+        # Deposit EUR cash into the portfolio
+        with executor.portfolio_engine._get_db_cursor_context() as cur:
+            cur.execute("INSERT INTO portfolio_cash (currency, cash, reserved) VALUES ('EUR', 1000.0, 0.0) ON CONFLICT (currency) DO UPDATE SET cash = 1000.0, reserved = 0.0")
+
+        alloc_id = str(uuid.uuid4())
+        # Save a PENDING allocation of 500 EUR on BTC/EUR
+        with executor.portfolio_engine._get_db_cursor_context() as cur:
+            executor.portfolio_engine._persist_allocation_audit_tx(
+                cur,
+                allocation_id=alloc_id,
+                proposal_id="prop-eur-test",
+                symbol="BTC/EUR",
+                action="OPEN",
+                req_risk=0.10,
+                app_risk=0.10,
+                req_notional=500.0,
+                app_notional=500.0,
+                reserved=500.0,
+                status="PENDING",
+                reason_codes=[],
+                port_version=1,
+                port_digest="",
+                marks_provenance={},
+                config_hash="v1",
+                code_sha="test_sha"
+            )
+            executor.portfolio_engine.reserve_capital(alloc_id, "EUR", 500.0, cur=cur)
+
+        # We set EUR/USDC mark to 1.10
+        executor.update_market_mark("EUR/USDC", 1.10)
+        executor.update_market_mark("BTC/EUR", 50000.0)
+
+        intent = ExecutionIntent(
+            execution_intent_id=str(uuid.uuid4()),
+            risk_decision_id="prop-eur-test",
+            mode="paper",
+            symbol="BTC/EUR",
+            action="OPEN",
+            side="BUY",
+            quantity=0.01,
+            client_order_id="client-order-eur-id",
+            created_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            allocation_id=alloc_id
+        )
+
+        res = executor.execute_intent("eur_lane", intent, 50000.0)
+        self.assertEqual(res.status, "FILLED")
+
+        # Verify that actual spent is at most reserved_capital (500 EUR)
+        total_cost = res.filled_quantity * res.average_fill_price + res.fee
+        self.assertLessEqual(total_cost, 500.0)
+
+        # Verify EUR cash and reserved cash in portfolio_cash
+        with executor.portfolio_engine._get_db_cursor_context() as cur:
+            cur.execute("SELECT cash, reserved FROM portfolio_cash WHERE currency = 'EUR'")
+            row = cur.fetchone()
+            eur_cash = float(row["cash"])
+            eur_reserved = float(row["reserved"])
+            
+            self.assertAlmostEqual(eur_cash, 1000.0 - total_cost)
+            self.assertEqual(eur_reserved, 0.0)
+
+            # USDC cash must remain untouched (should still be 5000.0)
+            cur.execute("SELECT cash FROM portfolio_cash WHERE currency = 'USDC'")
+            usdc_cash = float(cur.fetchone()["cash"])
+            self.assertEqual(usdc_cash, 5000.0)
+
 if __name__ == "__main__":
     unittest.main()

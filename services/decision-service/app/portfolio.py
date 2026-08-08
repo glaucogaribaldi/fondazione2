@@ -29,6 +29,8 @@ class PortfolioSnapshot(BaseModel):
     valuation_reason_codes: List[str] = Field(default_factory=list)
     stale_missing_marks: List[str] = Field(default_factory=list)
     stale_missing_conversion_paths: List[str] = Field(default_factory=list)
+    symbol_exposures: Dict[str, float] = Field(default_factory=dict)
+    risk_budget_consumed: float = 0.0
 
 class AllocationProposal(BaseModel):
     proposal_id: str
@@ -62,8 +64,18 @@ class PortfolioEngine:
         self.db = DatabaseConnection(db_url)
         self.base_currency = base_currency.upper()
 
-    def _get_db_cursor_context(self):
+    def _get_db_cursor_context(self, cur=None):
         """Unified cursor context manager for SQLite/PostgreSQL."""
+        if cur is not None:
+            class PassedCursorContext:
+                def __init__(self, c):
+                    self.c = c
+                def __enter__(self):
+                    return self.c
+                def __exit__(self, exc_type, exc_val, exc_tb):
+                    pass
+            return PassedCursorContext(cur)
+
         if self.db.use_sqlite:
             class SQLiteContext:
                 def __init__(self, conn):
@@ -247,6 +259,34 @@ class PortfolioEngine:
             version = int(metadata.get("version", 0))
             peak_equity = float(metadata.get("peak_equity", 10000.0))
 
+            # 3b. Load Pending Allocations (Requirement E2)
+            pending_allocs = []
+            if self.db.use_sqlite:
+                rows = active_cur.execute(
+                    "SELECT symbol, approved_notional, approved_risk_fraction, action, allocation_id FROM portfolio_allocations WHERE status = 'PENDING'"
+                ).fetchall()
+                for r in rows:
+                    pending_allocs.append({
+                        "symbol": r[0],
+                        "approved_notional": float(r[1]),
+                        "approved_risk_fraction": float(r[2]),
+                        "action": r[3],
+                        "allocation_id": r[4]
+                    })
+            else:
+                active_cur.execute(
+                    "SELECT symbol, approved_notional, approved_risk_fraction, action, allocation_id FROM portfolio_allocations WHERE status = 'PENDING'"
+                )
+                rows = active_cur.fetchall()
+                for r in rows:
+                    pending_allocs.append({
+                        "symbol": r["symbol"],
+                        "approved_notional": float(r["approved_notional"]),
+                        "approved_risk_fraction": float(r["approved_risk_fraction"]),
+                        "action": r["action"],
+                        "allocation_id": r["allocation_id"]
+                    })
+
         # 4. Perform Multi-Quote MTM Valuation & Exposure Calculation
         base_currency_cash = cash_balances.get(self.base_currency, 0.0)
         converted_other_cash = 0.0
@@ -267,9 +307,7 @@ class PortfolioEngine:
 
         # Calculate position market values and unrealized PnL in base currency
         marked_position_values = 0.0
-        gross_exposure = 0.0
-        net_exposure = 0.0
-        max_pos_val_base = 0.0
+        active_position_exposures = {}
 
         for sym, pos in positions.items():
             qty = pos["quantity"]
@@ -301,22 +339,58 @@ class PortfolioEngine:
             pos["unrealized_pnl"] = qty * (mark_price - pos["entry_price"])
 
             marked_position_values += pos_val_base
-            gross_exposure += abs(pos_val_base)
-            net_exposure += pos_val_base
-            max_pos_val_base = max(max_pos_val_base, pos_val_base)
+            active_position_exposures[sym] = pos_val_base
 
         portfolio_equity = base_currency_cash + converted_other_cash + marked_position_values
-        
-        # Track drawdown
-        peak_equity = max(peak_equity, portfolio_equity)
-        drawdown = ((peak_equity - portfolio_equity) / peak_equity) * 100.0 if peak_equity > 0.0 else 0.0
+
+        # Build symbol exposures mapping including PENDING allocations (Requirement E2)
+        symbol_exposures = {}
+        for sym, val in active_position_exposures.items():
+            symbol_exposures[sym] = val
+
+        total_pending_risk_fraction = 0.0
+        for alloc in pending_allocs:
+            sym = alloc["symbol"]
+            approved_notional = alloc["approved_notional"]
+            action = alloc["action"]
+            
+            if action in ["OPEN", "ADD"]:
+                p_mapping = get_product_mapping(sym)
+                quote = p_mapping.canonical_symbol.split("/")[-1].upper()
+                rate = get_conversion_rate_to_usdc(quote, get_mark_func) or 1.0
+                pending_val_base = approved_notional * rate
+                symbol_exposures[sym] = symbol_exposures.get(sym, 0.0) + pending_val_base
+                total_pending_risk_fraction += alloc["approved_risk_fraction"]
+
+        # Calculate final exposures incorporating PENDING allocations (Requirement E2)
+        gross_exposure = sum(abs(v) for v in symbol_exposures.values())
+        net_exposure = sum(v for v in symbol_exposures.values())
+        max_pos_val_base = max(symbol_exposures.values()) if symbol_exposures else 0.0
+
+        valuation_valid = (len(stale_missing_marks) == 0 and len(stale_missing_conversion_paths) == 0)
+
+        # Track peak_equity and drawdown (D2 Update: only if valuation is valid!)
+        if valuation_valid:
+            peak_equity = max(peak_equity, portfolio_equity)
+            drawdown = ((peak_equity - portfolio_equity) / peak_equity) * 100.0 if peak_equity > 0.0 else 0.0
+            # Save peak_equity if it updated
+            if peak_equity > float(metadata.get("peak_equity", 0.0)):
+                self._save_metadata("peak_equity", str(peak_equity))
+        else:
+            # Valuation is invalid: do not update or save peak_equity!
+            stored_peak_equity = float(metadata.get("peak_equity", 10000.0))
+            drawdown = ((stored_peak_equity - portfolio_equity) / stored_peak_equity) * 100.0 if stored_peak_equity > 0.0 else 0.0
+
         concentration = (max_pos_val_base / portfolio_equity) * 100.0 if portfolio_equity > 0.0 else 0.0
 
-        # Save peak_equity if it updated
-        if peak_equity > float(metadata.get("peak_equity", 0.0)):
-            self._save_metadata("peak_equity", str(peak_equity))
+        # Calculate risk budget consumed (Requirement E2)
+        active_risk_fraction = sum(
+            active_position_exposures[sym] / portfolio_equity
+            for sym in active_position_exposures
+        ) if portfolio_equity > 0.0 else 0.0
+        risk_budget_consumed = active_risk_fraction + total_pending_risk_fraction
 
-        # Build stable, deterministic state version digest (Requirement #1 / #7 / #11)
+        # Build stable, deterministic state version digest
         digest_payload = {
             "version": version,
             "equity": round(portfolio_equity, 4),
@@ -324,8 +398,6 @@ class PortfolioEngine:
             "positions": {s: {"qty": round(p["quantity"], 4), "entry": round(p["entry_price"], 4)} for s, p in sorted(positions.items())}
         }
         state_digest = hashlib.sha256(json.dumps(digest_payload, sort_keys=True).encode("utf-8")).hexdigest()
-
-        valuation_valid = (len(stale_missing_marks) == 0 and len(stale_missing_conversion_paths) == 0)
 
         return PortfolioSnapshot(
             equity=portfolio_equity,
@@ -342,7 +414,9 @@ class PortfolioEngine:
             valuation_valid=valuation_valid,
             valuation_reason_codes=valuation_reason_codes,
             stale_missing_marks=stale_missing_marks,
-            stale_missing_conversion_paths=stale_missing_conversion_paths
+            stale_missing_conversion_paths=stale_missing_conversion_paths,
+            symbol_exposures=symbol_exposures,
+            risk_budget_consumed=risk_budget_consumed
         )
 
     def _save_metadata(self, key: str, value: str):
@@ -407,55 +481,55 @@ class PortfolioEngine:
                     return True
         return False
 
-    def release_reservation(self, allocation_id: str, currency: str, amount: float):
+    def release_reservation(self, allocation_id: str, currency: str, amount: float, cur=None):
         """
         Releases reserved capital back to available cash (Requirement #4).
         """
         currency = currency.upper()
-        with self._get_db_cursor_context() as cur:
+        with self._get_db_cursor_context(cur) as active_cur:
             if self.db.use_sqlite:
-                cur.execute(
+                active_cur.execute(
                     "UPDATE portfolio_cash SET reserved = MAX(0.0, reserved - ?) WHERE currency = ?",
                     (amount, currency)
                 )
             else:
-                cur.execute(
+                active_cur.execute(
                     "UPDATE portfolio_cash SET reserved = GREATEST(0.0, reserved - %s) WHERE currency = %s",
                     (amount, currency)
                 )
 
-    def commit_allocation(self, allocation_id: str, currency: str, reserved_amount: float, actual_spent: float):
+    def commit_allocation(self, allocation_id: str, currency: str, reserved_amount: float, actual_spent: float, cur=None):
         """
         Commits reserved capital, deducting spent amount from cash and releasing any leftover reservation (Requirement #4 / #6).
         """
         currency = currency.upper()
-        with self._get_db_cursor_context() as cur:
+        with self._get_db_cursor_context(cur) as active_cur:
             if self.db.use_sqlite:
                 # Deduct from cash, release reservation
-                cur.execute(
+                active_cur.execute(
                     "UPDATE portfolio_cash SET cash = cash - ?, reserved = MAX(0.0, reserved - ?) WHERE currency = ?",
                     (actual_spent, reserved_amount, currency)
                 )
             else:
-                cur.execute(
+                active_cur.execute(
                     "UPDATE portfolio_cash SET cash = cash - %s, reserved = GREATEST(0.0, reserved - %s) WHERE currency = %s",
                     (actual_spent, reserved_amount, currency)
                 )
 
-    def deposit_cash(self, currency: str, amount: float):
+    def deposit_cash(self, currency: str, amount: float, cur=None):
         """
         Utility function to deposit or credit cash back to the portfolio (e.g. on sale).
         """
         currency = currency.upper()
-        with self._get_db_cursor_context() as cur:
+        with self._get_db_cursor_context(cur) as active_cur:
             if self.db.use_sqlite:
-                cur.execute(
+                active_cur.execute(
                     "INSERT INTO portfolio_cash (currency, cash, reserved) VALUES (?, ?, 0.0) "
                     "ON CONFLICT(currency) DO UPDATE SET cash = cash + ?",
                     (currency, amount, amount)
                 )
             else:
-                cur.execute("""
+                active_cur.execute("""
                     INSERT INTO portfolio_cash (currency, cash, reserved) 
                     VALUES (%s, %s, 0)
                     ON CONFLICT(currency) DO UPDATE SET cash = portfolio_cash.cash + EXCLUDED.cash
@@ -656,21 +730,21 @@ class PortfolioEngine:
                     max_concentration_limit_base = snapshot.equity * 0.30
                     max_concentration_quota_quote = max_concentration_limit_base / rate
 
-                    # D4: Add Remaining Capacity
-                    current_pos_val_quote = 0.0
-                    if proposal.symbol in snapshot.positions:
-                        pos = snapshot.positions[proposal.symbol]
-                        current_pos_val_quote = pos["quantity"] * price
+                    # E2: Use combined (filled + pending) pre-existing exposure on this symbol
+                    current_exposure_base = snapshot.symbol_exposures.get(proposal.symbol, 0.0)
+                    current_exposure_quote = current_exposure_base / rate
 
-                    if proposal.action == "ADD":
-                        remaining_position_capacity = max_notional_quote - current_pos_val_quote
-                        remaining_concentration_capacity = max_concentration_quota_quote - current_pos_val_quote
-                        safe_max_notional_quote = min(remaining_position_capacity, remaining_concentration_capacity, remaining_gross_quota_quote)
-                    else:
-                        safe_max_notional_quote = min(max_notional_quote, max_concentration_quota_quote, remaining_gross_quota_quote)
+                    remaining_position_capacity = max(0.0, max_notional_quote - current_exposure_quote)
+                    remaining_concentration_capacity = max(0.0, max_concentration_quota_quote - current_exposure_quote)
+                    
+                    safe_max_notional_quote = min(remaining_position_capacity, remaining_concentration_capacity, remaining_gross_quota_quote)
 
-                    # Limit 4: D7 Requested Risk Fraction and Requested Notional constraints
-                    max_by_risk_fraction_base = snapshot.equity * proposal.requested_risk_fraction
+                    # Limit 4: D7 and E2 Portfolio Risk Fraction constraints
+                    max_portfolio_risk_budget = 1.0  # 100% of equity
+                    remaining_portfolio_risk = max(0.0, max_portfolio_risk_budget - snapshot.risk_budget_consumed)
+                    allowed_risk_fraction = min(proposal.requested_risk_fraction, remaining_portfolio_risk)
+
+                    max_by_risk_fraction_base = snapshot.equity * allowed_risk_fraction
                     max_by_risk_fraction_quote = max_by_risk_fraction_base / rate
 
                     # Combine all limits dynamically (D7)
@@ -933,12 +1007,12 @@ class PortfolioEngine:
                     else:
                         cur.execute("UPDATE portfolio_allocations SET status = 'RELEASED' WHERE allocation_id = %s", (alloc["id"],))
 
-    def update_allocation_status(self, allocation_id: str, status: str):
-        with self._get_db_cursor_context() as cur:
+    def update_allocation_status(self, allocation_id: str, status: str, cur=None):
+        with self._get_db_cursor_context(cur) as active_cur:
             if self.db.use_sqlite:
-                cur.execute("UPDATE portfolio_allocations SET status = ? WHERE allocation_id = ?", (status, allocation_id))
+                active_cur.execute("UPDATE portfolio_allocations SET status = ? WHERE allocation_id = ?", (status, allocation_id))
             else:
-                cur.execute("UPDATE portfolio_allocations SET status = %s WHERE allocation_id = %s", (status, allocation_id))
+                active_cur.execute("UPDATE portfolio_allocations SET status = %s WHERE allocation_id = %s", (status, allocation_id))
 
     def update_position(
         self,
@@ -946,25 +1020,26 @@ class PortfolioEngine:
         quantity: float,
         entry_price: float,
         stop_loss_price: Optional[float] = None,
-        take_profit_price: Optional[float] = None
+        take_profit_price: Optional[float] = None,
+        cur=None
     ):
         """
         Updates the position for a symbol. If quantity drops to 0, deletes the position.
         """
-        with self._get_db_cursor_context() as cur:
+        with self._get_db_cursor_context(cur) as active_cur:
             if quantity <= 0.0:
                 if self.db.use_sqlite:
-                    cur.execute("DELETE FROM portfolio_positions WHERE symbol = ?", (symbol,))
+                    active_cur.execute("DELETE FROM portfolio_positions WHERE symbol = ?", (symbol,))
                 else:
-                    cur.execute("DELETE FROM portfolio_positions WHERE symbol = %s", (symbol,))
+                    active_cur.execute("DELETE FROM portfolio_positions WHERE symbol = %s", (symbol,))
             else:
                 if self.db.use_sqlite:
-                    cur.execute("""
+                    active_cur.execute("""
                         INSERT OR REPLACE INTO portfolio_positions (symbol, quantity, entry_price, realized_pnl, unrealized_pnl, stop_loss_price, take_profit_price, updated_at)
                         VALUES (?, ?, ?, 0.0, 0.0, ?, ?, CURRENT_TIMESTAMP)
                     """, (symbol, quantity, entry_price, stop_loss_price, take_profit_price))
                 else:
-                    cur.execute("""
+                    active_cur.execute("""
                         INSERT INTO portfolio_positions (symbol, quantity, entry_price, realized_pnl, unrealized_pnl, stop_loss_price, take_profit_price, updated_at)
                         VALUES (%s, %s, %s, 0.0, 0.0, %s, %s, now())
                         ON CONFLICT (symbol) DO UPDATE SET
